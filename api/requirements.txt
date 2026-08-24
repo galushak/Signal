@@ -1,5 +1,13 @@
 celery[redis]==5.5.3
+alembic==1.16.5
 fastapi==0.116.1
+PyJWT==2.10.1
+pillow==11.3.0
+pymupdf==1.26.4
+pytest==8.4.1
 pydantic-settings==2.10.1
+pwdlib[argon2]==0.3.0
+psycopg[binary]==3.2.10
+python-multipart==0.0.20
 sqlalchemy==2.0.43
 uvicorn[standard]==0.35.0

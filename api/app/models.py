@@ -1,0 +1,138 @@
+import uuid
+from datetime import datetime
+
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .database import Base
+
+
+def uid() -> str:
+    return str(uuid.uuid4())
+
+
+class Timestamped:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class User(Timestamped, Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(160))
+    password_hash: Mapped[str] = mapped_column(String(255))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    super_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    grants: Mapped[list["PermissionGrant"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user: Mapped[User] = relationship()
+
+
+class Building(Timestamped, Base):
+    __tablename__ = "buildings"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160), unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    players: Mapped[list["Player"]] = relationship(back_populates="building")
+
+
+class Player(Timestamped, Base):
+    __tablename__ = "players"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160))
+    building_id: Mapped[str] = mapped_column(ForeignKey("buildings.id"), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    enrollment_status: Mapped[str] = mapped_column(String(32), default="manual")
+    enrollment_code_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enrollment_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    device_identifier: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    software_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    network_info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    resolution: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    health_state: Mapped[str] = mapped_column(String(32), default="never_connected")
+    cache_state: Mapped[str] = mapped_column(String(32), default="unknown")
+    building: Mapped[Building] = relationship(back_populates="players")
+
+
+class MediaFolder(Timestamped, Base):
+    __tablename__ = "media_folders"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160))
+    parent_id: Mapped[str | None] = mapped_column(ForeignKey("media_folders.id"), nullable=True)
+    scope_type: Mapped[str] = mapped_column(String(32), default="district")
+    scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class Tag(Timestamped, Base):
+    __tablename__ = "tags"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+
+
+class MediaAsset(Timestamped, Base):
+    __tablename__ = "media_assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    display_name: Mapped[str] = mapped_column(String(255))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    media_type: Mapped[str] = mapped_column(String(32))
+    mime_type: Mapped[str] = mapped_column(String(127))
+    original_path: Mapped[str] = mapped_column(String(512))
+    processed_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    thumbnail_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    file_size: Mapped[int] = mapped_column(Integer)
+    processing_state: Mapped[str] = mapped_column(String(32), default="processing")
+    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scope_type: Mapped[str] = mapped_column(String(32), default="district")
+    scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    folder_id: Mapped[str | None] = mapped_column(ForeignKey("media_folders.id"), nullable=True)
+    uploaded_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    trashed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tags: Mapped[list["MediaAssetTag"]] = relationship(cascade="all, delete-orphan")
+
+
+class MediaAssetTag(Base):
+    __tablename__ = "media_asset_tags"
+    asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id", ondelete="CASCADE"), primary_key=True)
+    tag_id: Mapped[str] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
+
+
+class PermissionGrant(Timestamped, Base):
+    __tablename__ = "permission_grants"
+    __table_args__ = (UniqueConstraint("user_id", "capability", "scope_type", "scope_id", name="uq_permission_grant"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    capability: Mapped[str] = mapped_column(String(80), index=True)
+    scope_type: Mapped[str] = mapped_column(String(32), default="district")
+    scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    user: Mapped[User] = relationship(back_populates="grants")
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    action: Mapped[str] = mapped_column(String(160), index=True)
+    resource_type: Mapped[str] = mapped_column(String(80), index=True)
+    resource_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    resource_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scope_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
