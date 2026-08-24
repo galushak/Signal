@@ -1,0 +1,118 @@
+name: signal-signage
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - signage
+
+  api:
+    build:
+      context: ./api
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: postgresql://signage:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/signage
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_ROOT: /data/media
+      BACKUP_ROOT: /data/backups
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    volumes:
+      - media_data:/data/media
+      - backup_data:/data/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signage
+
+  worker:
+    build:
+      context: ./api
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app worker --loglevel=INFO
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: postgresql://signage:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/signage
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_ROOT: /data/media
+      BACKUP_ROOT: /data/backups
+    volumes:
+      - media_data:/data/media
+      - backup_data:/data/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - signage
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: signage
+      POSTGRES_USER: signage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signage -d signage"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signage
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signage
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.1
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    profiles: ["tunnel"]
+    depends_on:
+      web:
+        condition: service_started
+    networks:
+      - signage
+
+volumes:
+  postgres_data:
+  redis_data:
+  media_data:
+  backup_data:
+
+networks:
+  signage:
+    driver: bridge
