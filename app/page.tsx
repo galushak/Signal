@@ -213,6 +213,10 @@ export default function Home() {
         .then(() => setToken(saved))
         .catch(() => localStorage.removeItem("signal_token"));
   }, []);
+  const openLibraryDesign = useCallback((id: string) => {
+    setLibraryDesignId(id);
+    setView("content");
+  }, []);
   const logout = async () => {
     if (token)
       await request("/auth/logout", token, { method: "POST" }).catch(
@@ -237,10 +241,6 @@ export default function Home() {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 4000);
   };
-  const openLibraryDesign = useCallback((id: string) => {
-    setLibraryDesignId(id);
-    setView("content");
-  }, []);
   const navigation = [
     ["dashboard", "▦", "Dashboard"],
     ["content", "✦", "Content"],
