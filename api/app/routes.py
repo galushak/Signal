@@ -116,6 +116,12 @@ class AssignmentInput(BaseModel):
     daily_end: str | None = None
 
 
+class TemplateInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    design_document: dict
+    enabled: bool = True
+
+
 class FolderInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     parent_id: str | None = None
@@ -585,6 +591,53 @@ def create_assignment(content_id: str, payload: AssignmentInput, request: Reques
     if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
     if payload.weekdays and any(day not in range(7) for day in payload.weekdays): raise HTTPException(status_code=422, detail="Weekdays must be numbers from 0 (Monday) to 6 (Sunday).")
     assignment = ContentAssignment(content_id=item.id, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); record(db, actor=user, action="assignment.created", resource_type="assignment", resource_id=assignment.id, resource_name=item.name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request)); db.commit(); return assignment_data(assignment)
+
+
+@router.get("/content/{content_id}/assignments")
+def list_assignments(content_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    content_for_user(content_id, "view", user, db)
+    return [assignment_data(item) for item in db.scalars(select(ContentAssignment).where(ContentAssignment.content_id == content_id)) if allowed(user, "view", item.destination_type, item.destination_id, db)]
+
+
+@router.patch("/assignments/{assignment_id}")
+def update_assignment(assignment_id: str, payload: AssignmentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    assignment = db.get(ContentAssignment, assignment_id)
+    if not assignment: raise HTTPException(status_code=404, detail="Assignment not found.")
+    content_for_user(assignment.content_id, "schedule", user, db); scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
+    if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
+    if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
+    for key, value in payload.model_dump().items(): setattr(assignment, key, value)
+    record(db, actor=user, action="assignment.updated", resource_type="assignment", resource_id=assignment.id, scope_type=assignment.destination_type, scope_id=assignment.destination_id, source_ip=auth.client_ip(request)); db.commit(); return assignment_data(assignment)
+
+
+@router.delete("/assignments/{assignment_id}")
+def delete_assignment(assignment_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    assignment = db.get(ContentAssignment, assignment_id)
+    if not assignment: raise HTTPException(status_code=404, detail="Assignment not found.")
+    content_for_user(assignment.content_id, "schedule", user, db); require(user, "schedule", assignment.destination_type, assignment.destination_id, db); db.delete(assignment)
+    record(db, actor=user, action="assignment.removed", resource_type="assignment", resource_id=assignment_id, scope_type=assignment.destination_type, scope_id=assignment.destination_id, source_ip=auth.client_ip(request)); db.commit(); return {"ok": True}
+
+
+@router.get("/templates")
+def list_templates(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    if not user.super_admin and not db.scalars(select(PermissionGrant).where(PermissionGrant.user_id == user.id, PermissionGrant.capability == "create_content")).first(): raise HTTPException(status_code=403, detail="You don't have permission to create content.")
+    return [{"id": item.id, "name": item.name, "design_document": item.design_document, "enabled": item.enabled, "created_at": item.created_at} for item in db.scalars(select(ContentTemplate).where(ContentTemplate.trashed_at.is_(None), ContentTemplate.enabled.is_(True)).order_by(ContentTemplate.name))]
+
+
+@router.get("/destinations")
+def list_destinations(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    players = [player_data(item) for item in db.scalars(select(Player).order_by(Player.name)) if allowed(user, "view", PLAYER, item.id, db)]
+    zones = []
+    for item in db.scalars(select(Zone).order_by(Zone.name)):
+        if allowed(user, "view", ZONE, item.id, db): zones.append({**zone_data(item), "layout_name": item.layout.name})
+    return {"players": players, "zones": zones}
+
+
+@router.post("/templates", status_code=201)
+def create_template(payload: TemplateInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_templates", DISTRICT, None, db); valid_design(payload.design_document)
+    if db.scalar(select(ContentTemplate).where(ContentTemplate.name == payload.name.strip())): raise HTTPException(status_code=409, detail="A template with that name already exists.")
+    template = ContentTemplate(name=payload.name.strip(), design_document=payload.design_document, enabled=payload.enabled, created_by_id=user.id); db.add(template); db.flush(); record(db, actor=user, action="template.created", resource_type="template", resource_id=template.id, resource_name=template.name, source_ip=auth.client_ip(request)); db.commit(); return {"id": template.id, "name": template.name}
 
 
 def eligible(assignment: ContentAssignment, now: datetime) -> bool:

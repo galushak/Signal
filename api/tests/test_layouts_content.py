@@ -37,3 +37,21 @@ def test_published_versions_are_immutable_and_restore_creates_draft(client):
     assert published["design_document"]["elements"][0]["text"] == "first"
     assert test_client.post(f"/api/v1/content/{content['id']}/publish", headers=headers).status_code == 200
     assert test_client.post(f"/api/v1/content/{content['id']}/restore/{published['revision']}", headers=headers).status_code == 200
+
+
+def test_zone_only_user_cannot_access_sibling_zone(client):
+    test_client, _ = client
+    admin = login(test_client, "admin")
+    headers = {"Authorization": f"Bearer {admin}"}
+    layout = test_client.post("/api/v1/layouts", headers=headers, json={"name": "Zone ACL Test"}).json()
+    menu = test_client.post(f"/api/v1/layouts/{layout['id']}/zones", headers=headers, json={"name": "Menu", "x": 0, "y": 0, "width": 960, "height": 1080}).json()
+    district = test_client.post(f"/api/v1/layouts/{layout['id']}/zones", headers=headers, json={"name": "District", "x": 960, "y": 0, "width": 960, "height": 1080}).json()
+    kitchen = next(item for item in test_client.get("/api/v1/users", headers=headers).json() if item["username"] == "kitchen")
+    for capability in ("view", "create_content", "edit_content", "publish", "schedule"):
+        assert test_client.post(f"/api/v1/users/{kitchen['id']}/grants", headers=headers, json={"capability": capability, "scope_type": "zone", "scope_id": menu["id"]}).status_code == 201
+    kitchen_headers = {"Authorization": f"Bearer {login(test_client, 'kitchen')}"}
+    destinations = test_client.get("/api/v1/destinations", headers=kitchen_headers).json()
+    assert [zone["id"] for zone in destinations["zones"]] == [menu["id"]]
+    content = test_client.post("/api/v1/content", headers=kitchen_headers, json={"name": "Menu only", "scope_type": "zone", "scope_id": menu["id"], "design_document": document("Lunch")})
+    assert content.status_code == 201
+    assert test_client.post(f"/api/v1/content/{content.json()['id']}/assignments", headers=kitchen_headers, json={"destination_type": "zone", "destination_id": district["id"]}).status_code == 403
