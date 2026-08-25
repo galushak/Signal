@@ -171,6 +171,9 @@ small,
   background: #fff;
   border-bottom: 1px solid var(--line);
 }
+.mobile-nav {
+  display: none;
+}
 .breadcrumb {
   color: #78849a;
   font-size: 13px;
@@ -376,10 +379,9 @@ small,
 .player-row {
   min-height: 75px;
   display: grid;
-  grid-template-columns: 10px 35px minmax(140px, 1.3fr) minmax(
-      130px,
-      1.15fr
-    ) minmax(105px, 0.9fr) 30px;
+  grid-template-columns:
+    10px 35px minmax(140px, 1.3fr) minmax(130px, 1.15fr)
+    minmax(105px, 0.9fr) 30px;
   gap: 9px;
   align-items: center;
   padding: 10px 16px;
@@ -654,10 +656,9 @@ small,
 .table-head,
 .content-line {
   display: grid;
-  grid-template-columns: minmax(250px, 2fr) 110px minmax(
-      150px,
-      1.25fr
-    ) 110px 20px;
+  grid-template-columns:
+    minmax(250px, 2fr) 110px minmax(150px, 1.25fr)
+    110px 20px;
   align-items: center;
   gap: 12px;
 }
@@ -1357,6 +1358,19 @@ small,
   }
   .topbar {
     padding: 0 18px;
+  }
+  .mobile-nav {
+    display: block;
+    min-width: 122px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #fff;
+    padding: 7px 8px;
+    color: #40506a;
+    font: inherit;
+  }
+  .breadcrumb {
+    display: none;
   }
   .page {
     padding: 25px 18px;

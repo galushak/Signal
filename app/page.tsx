@@ -297,6 +297,18 @@ export default function Home() {
       </aside>
       <section className="workspace">
         <header className="topbar">
+          <select
+            className="mobile-nav"
+            value={view}
+            aria-label="Navigate Signal"
+            onChange={(event) => setView(event.target.value)}
+          >
+            {navigation.map(([id, _icon, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
           <div className="breadcrumb">
             West Creek <span>/</span>{" "}
             {view === "users"
