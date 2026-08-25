@@ -900,6 +900,7 @@ function ContentView({
 }) {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [selected, setSelected] = useState<ContentItem | null>(null);
+  const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const reload = useCallback(
@@ -924,7 +925,7 @@ function ContentView({
     const form = new FormData(formElement);
     const design = designFor(String(form.get("template") || "blank"));
     try {
-      await request("/content", token, {
+      const created = await request("/content", token, {
         method: "POST",
         body: JSON.stringify({
           name: form.get("name"),
@@ -933,6 +934,8 @@ function ContentView({
       });
       notify("Content draft created.");
       formElement.reset();
+      setSelected(created);
+      setEditing(true);
       reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to create content.");
@@ -992,6 +995,7 @@ function ContentView({
   const document =
     selected?.draft_version?.design_document ||
     selected?.published_version?.design_document;
+  if (editing && selected && document) return <DesignerScreen content={selected} document={document as DesignerDocument} token={token} notify={notify} onBack={() => { setEditing(false); reload(); }} onChanged={persistDesign} />;
   return (
     <>
       <div className="page-title">
@@ -1027,6 +1031,7 @@ function ContentView({
               }
               onClick={() => {
                 setSelected(item);
+                setEditing(true);
                 setText(
                   (item.draft_version || item.published_version)
                     ?.design_document.elements[0]?.text || "",
@@ -1064,6 +1069,15 @@ function ContentView({
       </section>
     </>
   );
+}
+
+function DesignerScreen({ content, document, token, notify, onBack, onChanged }: { content: ContentItem; document: DesignerDocument; token: string; notify: (message: string) => void; onBack: () => void; onChanged: (document: DesignerDocument) => void }) {
+  const [saving, setSaving] = useState("Saved ✓");
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [published, setPublished] = useState(Boolean(content.published_version));
+  const save = (next: DesignerDocument) => { setSaving("Saving…"); onChanged(next); window.setTimeout(() => setSaving("Saved ✓"), 400); };
+  const publish = async () => { try { await request(`/content/${content.id}/publish`, token, { method: "POST" }); setPublished(true); notify("Content published. Select one or more destinations below."); } catch (reason) { notify(reason instanceof Error ? reason.message : "Unable to publish content."); } };
+  return <main className="designer-page"><header className="designer-header"><button className="back" onClick={onBack}>← Content</button><div className="designer-name"><b>{content.name}</b><small>{saving}</small></div><div className="designer-header-actions"><button className="secondary-button" onClick={() => notify("Preview uses the same 16:9 document as the canvas. This is a server-side design preview, not a player screenshot.")}>Preview</button><button className="primary" onClick={() => setPublishOpen(true)}>Publish</button></div></header><SignalDesigner document={document} onChange={save} onPreview={() => notify("Preview uses the same 16:9 document as the canvas.")} onPublish={() => setPublishOpen(true)} />{publishOpen && <div className="modal-backdrop"><section className="publish-drawer"><header><div><p className="eyebrow">PUBLISH</p><h2>Publish “{content.name}”</h2></div><button className="close" onClick={() => setPublishOpen(false)}>×</button></header>{!published && <section className="publish-step"><p>Your published revision remains unchanged until you confirm.</p><button className="primary" onClick={publish}>Publish revision</button></section>}<AssignmentPanel content={content} token={token} published={published} notify={notify} /><footer><button className="secondary-button" onClick={() => setPublishOpen(false)}>Done</button></footer></section></div>}</main>;
 }
 
 function AssignmentPanel({ content, token, published, notify }: { content: ContentItem; token: string; published: boolean; notify: (message: string) => void }) {
