@@ -562,15 +562,14 @@ function PlayersView({
 }) {
   const [players, setPlayers] = useState<Player[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
-  const [layouts, setLayouts] = useState<Layout[]>([]);
+  const [showEnrollment, setShowEnrollment] = useState(false);
   const [error, setError] = useState("");
   const reload = useCallback(
     () =>
-      Promise.all([request("/players", token), request("/buildings", token), request("/layouts", token)])
-        .then(([p, b, l]) => {
+      Promise.all([request("/players", token), request("/buildings", token)])
+        .then(([p, b]) => {
           setPlayers(p);
           setBuildings(b);
-          setLayouts(l);
         })
         .catch((e) => setError(e.message)),
     [token],
@@ -601,16 +600,6 @@ function PlayersView({
       setError(e instanceof Error ? e.message : "Unable to create player.");
     }
   };
-  const enroll = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    try {
-      await request("/players/enroll", token, { method: "POST", body: JSON.stringify({ code: String(form.get("code") || "").toUpperCase(), name: form.get("name"), building_id: form.get("building_id"), layout_id: form.get("layout_id") || null, description: form.get("description") || null }) });
-      notify("Display enrolled. The player will retrieve its device credential automatically.");
-      formElement.reset(); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Unable to enroll display."); }
-  };
   return (
     <>
       <div className="page-title">
@@ -619,9 +608,11 @@ function PlayersView({
           <h1>Players</h1>
           <p>Player status is reported by real devices only.</p>
         </div>
+        <button className="primary" onClick={() => setShowEnrollment(true)}>Enroll Display</button>
       </div>
-      <section className="panel create-panel">
-        <h2>Add a player</h2>
+      <details className="panel create-panel placeholder-player">
+        <summary>Add Placeholder Display</summary>
+        <p>Use this only for a record without a physical Signal Player. Real devices should be enrolled above.</p>
         <form onSubmit={add} className="inline-form">
           <input name="name" placeholder="e.g. HS Cafeteria" required />
           <select name="building_id" required defaultValue="">
@@ -635,20 +626,9 @@ function PlayersView({
             ))}
           </select>
           <input name="description" placeholder="Location (optional)" />
-          <button className="secondary-button">Add player</button>
+          <button className="secondary-button">Add placeholder</button>
         </form>
-      </section>
-      <section className="panel create-panel">
-        <h2>Enroll Display</h2>
-        <form onSubmit={enroll} className="inline-form">
-          <input name="code" placeholder="Code shown on player" required />
-          <input name="name" placeholder="Display name" required />
-          <select name="building_id" required defaultValue=""><option value="" disabled>Choose building</option>{buildings.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-          <select name="layout_id" defaultValue=""><option value="">Layout (assign later)</option>{layouts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-          <input name="description" placeholder="Location (optional)" />
-          <button className="primary">Enroll display</button>
-        </form>
-      </section>
+      </details>
       {error && <ErrorState message={error} />}
       {!error && (
         <section className="panel functional-panel">
@@ -687,8 +667,31 @@ function PlayersView({
           )}
         </section>
       )}
+      {showEnrollment && <EnrollmentDialog token={token} onClose={() => setShowEnrollment(false)} onEnrolled={(name) => { setShowEnrollment(false); notify(`${name} enrolled successfully.`); reload(); }} />}
     </>
   );
+}
+
+function EnrollmentDialog({ token, onClose, onEnrolled }: { token: string; onClose: () => void; onEnrolled: (name: string) => void }) {
+  const [step, setStep] = useState<"code" | "setup">("code");
+  const [code, setCode] = useState("");
+  const [options, setOptions] = useState<{ buildings: Building[]; layouts: Layout[] }>({ buildings: [], layouts: [] });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const continueCode = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      const result = await request("/player-enrollments/validate", token, { method: "POST", body: JSON.stringify({ code: code.toUpperCase() }) });
+      if (result.status !== "valid") { setError(result.status === "expired" ? "This enrollment code has expired. Check the display for its new code." : result.status === "used" ? "This enrollment code has already been used." : "We couldn't find that enrollment code."); return; }
+      setOptions(await request("/player-enrollments/options", token)); setStep("setup");
+    } catch { setError("We couldn't validate that enrollment code. Check your permission and try again."); } finally { setBusy(false); }
+  };
+  const claim = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError("");
+    try { await request("/players/enroll", token, { method: "POST", body: JSON.stringify({ code: code.toUpperCase(), name: form.get("name"), building_id: form.get("building_id"), layout_id: form.get("layout_id") || null, description: form.get("description") || null }) }); onEnrolled(String(form.get("name"))); }
+    catch (e) { const message = e instanceof Error ? e.message : "Unable to enroll display."; setError(message.includes("expired") ? "This enrollment code has expired. Check the display for its new code." : message.includes("already been used") ? "This enrollment code has already been used." : "We couldn't enroll this display. Please check the details and try again."); } finally { setBusy(false); }
+  };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="enroll-title"><header><div><p className="eyebrow">DISPLAYS</p><h2 id="enroll-title">Enroll a Display</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header>{step === "code" ? <form onSubmit={continueCode}><label>Enrollment code<input autoFocus value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} placeholder="523-UKJ" required /></label><p>The enrollment code is shown on the display you want to add.</p>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Checking…" : "Continue"}</button></footer></form> : <form onSubmit={claim}><div className="enrollment-code">Code: <b>{code} ✓</b></div><label>Display name<input name="name" placeholder="HS Cafeteria" required autoFocus /></label><label>Building<select name="building_id" required defaultValue=""><option value="" disabled>Choose building</option>{options.buildings.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Layout <small>(recommended)</small><select name="layout_id" defaultValue=""><option value="">Assign later</option>{options.layouts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Location <small>(optional)</small><input name="description" placeholder="Serving line" /></label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={() => setStep("code")}>Back</button><button className="primary" disabled={busy || !options.buildings.length}>{busy ? "Enrolling…" : "Enroll Display"}</button></footer></form>}</section></div>;
 }
 
 function BuildingsView({

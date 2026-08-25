@@ -80,6 +80,10 @@ class AgentEnrollmentInput(BaseModel):
     device_identifier: str = Field(min_length=8, max_length=255)
 
 
+class EnrollmentValidationInput(BaseModel):
+    code: str = Field(min_length=4, max_length=32)
+
+
 class HeartbeatInput(BaseModel):
     software_version: str = Field(default="unknown", max_length=80)
     applied_state_revision: str | None = Field(default=None, max_length=128)
@@ -349,6 +353,41 @@ def pending_enrollment(code: str, db: Session, *, require_unclaimed: bool = Fals
     raise HTTPException(status_code=404, detail="Enrollment code was not found or has expired.")
 
 
+def enrollment_code_state(code: str, db: Session) -> tuple[PlayerEnrollment | None, str]:
+    """Return a UI-safe code status; device secrets never leave this helper."""
+    for enrollment in db.scalars(select(PlayerEnrollment)).all():
+        if auth.verify_password(code.upper(), enrollment.code_hash):
+            if enrollment.claimed_at:
+                return enrollment, "used"
+            if auth.utc_datetime(enrollment.expires_at) <= datetime.now(UTC):
+                return enrollment, "expired"
+            return enrollment, "valid"
+    return None, "invalid"
+
+
+def can_manage_any_display(user: User, db: Session) -> bool:
+    return user.super_admin or bool(db.scalar(select(PermissionGrant.id).where(PermissionGrant.user_id == user.id, PermissionGrant.capability == "manage_players")))
+
+
+@router.get("/player-enrollments/options")
+def player_enrollment_options(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    if not can_manage_any_display(user, db):
+        raise HTTPException(status_code=403, detail="You don't have permission to enroll displays.")
+    buildings = [building_data(item) for item in db.scalars(select(Building).where(Building.enabled.is_(True)).order_by(Building.name)) if allowed(user, "manage_players", BUILDING, item.id, db)]
+    # Layouts are district-managed in the current permission model. Do not leak
+    # layout names to a building-only administrator.
+    layouts = [layout_data(item) for item in db.scalars(select(Layout).where(Layout.enabled.is_(True), Layout.trashed_at.is_(None)).order_by(Layout.name))] if allowed(user, "manage_layouts", DISTRICT, None, db) else []
+    return {"buildings": buildings, "layouts": layouts}
+
+
+@router.post("/player-enrollments/validate")
+def validate_player_enrollment(payload: EnrollmentValidationInput, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    if not can_manage_any_display(user, db):
+        raise HTTPException(status_code=403, detail="You don't have permission to enroll displays.")
+    _, state = enrollment_code_state(payload.code, db)
+    return {"status": state}
+
+
 @router.post("/player-agent/enrollment/start")
 def start_agent_enrollment(payload: AgentEnrollmentInput, db: Session = Depends(get_db)):
     """Register the code displayed by an otherwise unauthenticated player."""
@@ -383,7 +422,11 @@ def claim_player_enrollment(payload: EnrollmentClaimInput, request: Request, use
     require(user, "manage_players", BUILDING, payload.building_id, db)
     if payload.layout_id and not db.get(Layout, payload.layout_id):
         raise HTTPException(status_code=422, detail="Choose a valid layout.")
-    enrollment = pending_enrollment(payload.code.upper(), db, require_unclaimed=True)
+    enrollment, state = enrollment_code_state(payload.code, db)
+    if state == "invalid": raise HTTPException(status_code=404, detail="Enrollment code was not found.")
+    if state == "expired": raise HTTPException(status_code=410, detail="Enrollment code has expired.")
+    if state == "used": raise HTTPException(status_code=409, detail="Enrollment code has already been used.")
+    assert enrollment is not None
     secret = secrets.token_urlsafe(32)
     player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, layout_id=payload.layout_id, enrollment_status="enrolled", device_identifier=enrollment.device_identifier, device_secret_hash=auth.hash_password(secret), health_state="never_connected")
     db.add(player); db.flush()
