@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { SignalDesigner, type DesignerDocument } from "./Designer";
 
 const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000/api/v1";
 type User = {
@@ -980,6 +981,14 @@ function ContentView({
       setError(e instanceof Error ? e.message : "Unable to publish content.");
     }
   };
+  const persistDesign = async (design: DesignerDocument) => {
+    if (!selected) return;
+    try {
+      await request(`/content/${selected.id}/draft`, token, { method: "POST", body: JSON.stringify({ design_document: design }) });
+      setSelected(current => current ? { ...current, draft_version: { revision: current.draft_version?.revision || (current.published_version?.revision || 0) + 1, design_document: design } } : current);
+      setItems(current => current.map(item => item.id === selected.id ? { ...item, draft_version: { revision: item.draft_version?.revision || (item.published_version?.revision || 0) + 1, design_document: design } } : item));
+    } catch (reason) { setError(reason instanceof Error ? `Draft save failed: ${reason.message}` : "Draft save failed. Your changes remain in this browser."); }
+  };
   const document =
     selected?.draft_version?.design_document ||
     selected?.published_version?.design_document;
@@ -1037,27 +1046,7 @@ function ContentView({
         </div>
         {selected && document ? (
           <div className="designer">
-            <div className="button-row">
-              {['text', 'image', 'video', 'shape', 'clock', 'date', 'weather', 'website', 'qr', 'ticker', 'pdf'].map(type => <button className="secondary-button" key={type} onClick={() => addElement(type)}>+ {type}</button>)}
-            </div>
-            <div className="preview-canvas">
-              {document.elements.map((element, index) => <span key={element.id} style={{ position: 'absolute', left: `${element.x / 19.2}%`, top: `${element.y / 10.8}%`, width: `${element.width / 19.2}%`, minHeight: `${element.height / 10.8}%`, zIndex: element.z_index || index + 1 }}>{index === 0 ? text || element.text : element.text || element.type}</span>)}
-            </div>
-            <label>
-              Headline
-              <input
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-              />
-            </label>
-            <div className="button-row">
-              <button className="secondary-button" onClick={save}>
-                Save draft
-              </button>
-              <button className="primary" onClick={publish}>
-                Publish
-              </button>
-            </div>
+            <SignalDesigner document={document as DesignerDocument} onChange={persistDesign} onPreview={() => notify("Preview shows the 16:9 design state. Player context is available from each Player's Preview action.")} onPublish={publish} />
             <AssignmentPanel
               content={selected}
               token={token}
