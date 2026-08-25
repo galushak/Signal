@@ -1,0 +1,15 @@
+[Unit]
+Description=Signal Player Agent
+After=network.target
+
+[Service]
+User=signal-player
+WorkingDirectory=/opt/signal-player
+Environment=SIGNAL_PLATFORM=raspberry-pi
+Environment=SIGNAL_STATE_DIR=/var/lib/signal-player
+ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8090
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

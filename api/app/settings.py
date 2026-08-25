@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 480
     max_upload_bytes: int = 524_288_000
+    player_timezone: str = "America/New_York"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

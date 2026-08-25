@@ -562,13 +562,15 @@ function PlayersView({
 }) {
   const [players, setPlayers] = useState<Player[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
+  const [layouts, setLayouts] = useState<Layout[]>([]);
   const [error, setError] = useState("");
   const reload = useCallback(
     () =>
-      Promise.all([request("/players", token), request("/buildings", token)])
-        .then(([p, b]) => {
+      Promise.all([request("/players", token), request("/buildings", token), request("/layouts", token)])
+        .then(([p, b, l]) => {
           setPlayers(p);
           setBuildings(b);
+          setLayouts(l);
         })
         .catch((e) => setError(e.message)),
     [token],
@@ -599,6 +601,16 @@ function PlayersView({
       setError(e instanceof Error ? e.message : "Unable to create player.");
     }
   };
+  const enroll = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    try {
+      await request("/players/enroll", token, { method: "POST", body: JSON.stringify({ code: String(form.get("code") || "").toUpperCase(), name: form.get("name"), building_id: form.get("building_id"), layout_id: form.get("layout_id") || null, description: form.get("description") || null }) });
+      notify("Display enrolled. The player will retrieve its device credential automatically.");
+      formElement.reset(); reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to enroll display."); }
+  };
   return (
     <>
       <div className="page-title">
@@ -624,6 +636,17 @@ function PlayersView({
           </select>
           <input name="description" placeholder="Location (optional)" />
           <button className="secondary-button">Add player</button>
+        </form>
+      </section>
+      <section className="panel create-panel">
+        <h2>Enroll Display</h2>
+        <form onSubmit={enroll} className="inline-form">
+          <input name="code" placeholder="Code shown on player" required />
+          <input name="name" placeholder="Display name" required />
+          <select name="building_id" required defaultValue=""><option value="" disabled>Choose building</option>{buildings.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+          <select name="layout_id" defaultValue=""><option value="">Layout (assign later)</option>{layouts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+          <input name="description" placeholder="Location (optional)" />
+          <button className="primary">Enroll display</button>
         </form>
       </section>
       {error && <ErrorState message={error} />}

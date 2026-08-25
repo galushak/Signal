@@ -10,6 +10,7 @@ Compose application; no hosted OpenAI or ChatGPT service is required.
 | `web` | React/Vinext management console on port 3000 |
 | `api` | FastAPI API and device-facing HTTPS/WSS foundation |
 | `worker` | Redis-backed media processing jobs (FFmpeg/PDF/image work) |
+| `pi` | Signal Player agent and Docker Pi simulator on port 8090 |
 | `db` | PostgreSQL durable application data |
 | `redis` | Queue and cache |
 | `cloudflared` | Optional outbound-only Cloudflare Tunnel |
@@ -51,6 +52,17 @@ docker compose exec api python -m app.bootstrap \
 Sign in at `http://localhost:3000` with those credentials. A Super Admin
 bypasses scoped permissions; all other access is granted by capability at
 District, Building, or Player scope and evaluated by the API.
+
+## Docker Test Pi
+
+`pi` is the real player agent with a persistent `pi_state` volume for its device
+identity, manifest, and media cache. Start the full stack with `docker compose
+up --build -d`, open `http://localhost:8090`, and enter its displayed code in
+**Displays → Enroll Display**. `docker compose restart pi` preserves identity;
+`docker compose stop api` leaves the local renderer playing its cached state;
+`docker compose start api` reconnects it. Use `docker compose logs -f pi` for
+sync and cache activity. To intentionally reset only the simulator, stop the
+stack and remove `signal-signage_pi_state` (destructive; not needed normally).
 
 ## Migrations
 

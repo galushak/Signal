@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -13,7 +13,8 @@ from . import auth
 from .audit import record
 from .authorization import BUILDING, DISTRICT, PLAYER, ZONE, allowed, require, visible_building_ids, visible_player_ids
 from .database import get_db
-from .models import AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, Tag, User, Zone
+from .models import AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, PlayerCommand, PlayerEnrollment, Tag, User, Zone
+from .player_protocol import MANIFEST_SCHEMA, build_manifest, media_is_allowed
 from .settings import get_settings
 from .worker import prepare_media
 
@@ -64,6 +65,41 @@ class PlayerInput(BaseModel):
     enabled: bool = True
     resolution: str | None = None
     layout_id: str | None = None
+
+
+class EnrollmentClaimInput(BaseModel):
+    code: str = Field(min_length=4, max_length=32)
+    name: str = Field(min_length=1, max_length=160)
+    building_id: str
+    layout_id: str | None = None
+    description: str | None = None
+
+
+class AgentEnrollmentInput(BaseModel):
+    code: str = Field(min_length=4, max_length=32)
+    device_identifier: str = Field(min_length=8, max_length=255)
+
+
+class HeartbeatInput(BaseModel):
+    software_version: str = Field(default="unknown", max_length=80)
+    applied_state_revision: str | None = Field(default=None, max_length=128)
+    renderer_status: str = Field(default="unknown", max_length=32)
+    cache_state: str = Field(default="unknown", max_length=32)
+    resolution: str | None = Field(default=None, max_length=32)
+    current_content: str | None = Field(default=None, max_length=160)
+    uptime_seconds: int | None = Field(default=None, ge=0)
+    disk_usage: dict | None = None
+    network_state: dict | None = None
+    temperature: str | float | None = None
+
+
+class CommandInput(BaseModel):
+    command: str
+
+
+class CommandResultInput(BaseModel):
+    status: str = Field(pattern="^(completed|failed|unsupported)$")
+    result: dict | None = None
 
 
 class LayoutInput(BaseModel):
@@ -139,8 +175,20 @@ def building_data(building: Building) -> dict:
 
 
 def player_data(player: Player) -> dict:
-    connected = player.last_seen_at is not None
-    return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": player.health_state if connected else "never_connected", "cache_state": player.cache_state, "created_at": player.created_at, "updated_at": player.updated_at}
+    last_seen = auth.utc_datetime(player.last_seen_at) if player.last_seen_at else None
+    state = "never_connected" if not last_seen else ("online" if datetime.now(UTC) - last_seen <= timedelta(seconds=75) else "offline")
+    runtime = player.runtime_data or {}
+    return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
+
+
+def agent_player(request: Request, db: Session) -> Player:
+    """Authenticate a device token without involving human JWT sessions."""
+    player_id = request.headers.get("x-signal-player-id")
+    secret = request.headers.get("x-signal-player-secret")
+    player = db.get(Player, player_id) if player_id else None
+    if not player or not player.enabled or not player.device_secret_hash or not secret or not auth.verify_password(secret, player.device_secret_hash):
+        raise HTTPException(status_code=401, detail="A valid Signal Player credential is required.")
+    return player
 
 
 def media_data(asset: MediaAsset, db: Session) -> dict:
@@ -291,6 +339,72 @@ def issue_enrollment_code(player_id: str, request: Request, user: User = Depends
     db.commit(); return {"code": code, "expires_at": player.enrollment_expires_at}
 
 
+def pending_enrollment(code: str, db: Session, *, require_unclaimed: bool = False) -> PlayerEnrollment:
+    now = datetime.now(UTC)
+    for enrollment in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.expires_at > now)).all():
+        if auth.verify_password(code, enrollment.code_hash):
+            if require_unclaimed and enrollment.claimed_at:
+                raise HTTPException(status_code=409, detail="This enrollment code has already been claimed.")
+            return enrollment
+    raise HTTPException(status_code=404, detail="Enrollment code was not found or has expired.")
+
+
+@router.post("/player-agent/enrollment/start")
+def start_agent_enrollment(payload: AgentEnrollmentInput, db: Session = Depends(get_db)):
+    """Register the code displayed by an otherwise unauthenticated player."""
+    now = datetime.now(UTC)
+    existing = db.scalar(select(PlayerEnrollment).where(PlayerEnrollment.device_identifier == payload.device_identifier))
+    if existing and not existing.claimed_at and auth.utc_datetime(existing.expires_at) > now and auth.verify_password(payload.code.upper(), existing.code_hash):
+        return {"status": "pending", "expires_at": existing.expires_at}
+    if existing and not existing.claimed_at:
+        db.delete(existing)
+    enrollment = PlayerEnrollment(code_hash=auth.hash_password(payload.code.upper()), device_identifier=payload.device_identifier, expires_at=now + timedelta(minutes=15))
+    db.add(enrollment); db.commit()
+    return {"status": "pending", "expires_at": enrollment.expires_at}
+
+
+@router.get("/player-agent/enrollment/{code}")
+def agent_enrollment_status(code: str, db: Session = Depends(get_db)):
+    enrollment = pending_enrollment(code.upper(), db)
+    if not enrollment.claimed_at:
+        return {"status": "pending", "expires_at": enrollment.expires_at}
+    if enrollment.delivered_at or not enrollment.credential_delivery_secret or not enrollment.player_id:
+        return {"status": "claimed"}
+    secret = enrollment.credential_delivery_secret
+    enrollment.credential_delivery_secret = None
+    enrollment.delivered_at = datetime.now(UTC)
+    db.commit()
+    return {"status": "enrolled", "player_id": enrollment.player_id, "device_secret": secret}
+
+
+@router.post("/players/enroll", status_code=201)
+def claim_player_enrollment(payload: EnrollmentClaimInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    scope_valid(BUILDING, payload.building_id, db)
+    require(user, "manage_players", BUILDING, payload.building_id, db)
+    if payload.layout_id and not db.get(Layout, payload.layout_id):
+        raise HTTPException(status_code=422, detail="Choose a valid layout.")
+    enrollment = pending_enrollment(payload.code.upper(), db, require_unclaimed=True)
+    secret = secrets.token_urlsafe(32)
+    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, layout_id=payload.layout_id, enrollment_status="enrolled", device_identifier=enrollment.device_identifier, device_secret_hash=auth.hash_password(secret), health_state="never_connected")
+    db.add(player); db.flush()
+    enrollment.player_id, enrollment.claimed_at, enrollment.credential_delivery_secret = player.id, datetime.now(UTC), secret
+    record(db, actor=user, action="player.enrolled", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
+    db.commit(); db.refresh(player)
+    return player_data(player)
+
+
+@router.post("/players/{player_id}/commands", status_code=201)
+def queue_player_command(player_id: str, payload: CommandInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player: raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "restart_players", PLAYER, player.id, db)
+    if payload.command not in {"force_sync", "restart_renderer", "restart_player", "clear_cache", "screenshot"}:
+        raise HTTPException(status_code=422, detail="Unsupported player command.")
+    command = PlayerCommand(player_id=player.id, command=payload.command, requested_by_id=user.id)
+    db.add(command); db.flush(); record(db, actor=user, action="player.command_queued", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"command": payload.command}); db.commit()
+    return {"id": command.id, "status": command.status}
+
+
 @router.get("/users")
 def list_users(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     require(user, "manage_users", DISTRICT, None, db)
@@ -410,6 +524,67 @@ def thumbnail(asset_id: str, user: User = Depends(auth.get_current_user), db: Se
     asset = media_for_user(asset_id, user, db)
     if not asset.thumbnail_path: raise HTTPException(status_code=404, detail="A thumbnail is not ready yet.")
     return FileResponse(settings.media_root / asset.thumbnail_path, media_type="image/jpeg")
+
+
+@router.post("/player-agent/heartbeat")
+def player_heartbeat(payload: HeartbeatInput, request: Request, db: Session = Depends(get_db)):
+    player = agent_player(request, db)
+    player.last_seen_at = datetime.now(UTC)
+    player.software_version = payload.software_version
+    player.applied_state_revision = payload.applied_state_revision
+    player.resolution = payload.resolution or player.resolution
+    player.health_state = "online"
+    player.cache_state = payload.cache_state
+    player.network_info = payload.network_state
+    player.runtime_data = {"renderer_status": payload.renderer_status, "current_content": payload.current_content, "uptime_seconds": payload.uptime_seconds, "disk_usage": payload.disk_usage, "temperature": payload.temperature}
+    manifest = build_manifest(player, db)
+    player.desired_state_revision = manifest["revision"]
+    db.commit()
+    return {"ok": True, "desired_state_revision": manifest["revision"], "poll_after_seconds": 15}
+
+
+@router.get("/player-agent/manifest")
+def player_manifest(request: Request, db: Session = Depends(get_db)):
+    player = agent_player(request, db)
+    manifest = build_manifest(player, db)
+    player.desired_state_revision = manifest["revision"]
+    db.commit()
+    etag = f'"{manifest["revision"]}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(manifest, headers={"ETag": etag, "Cache-Control": "no-store"})
+
+
+@router.get("/player-agent/media/{asset_id}")
+def player_media(asset_id: str, request: Request, db: Session = Depends(get_db)):
+    player = agent_player(request, db)
+    asset = media_is_allowed(asset_id, player, db)
+    if not asset:
+        raise HTTPException(status_code=404, detail="This media item is not in the player's desired state.")
+    path = settings.media_root / (asset.processed_path or asset.original_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="The media file is not available.")
+    return FileResponse(path, media_type=asset.mime_type, filename=asset.original_filename)
+
+
+@router.get("/player-agent/commands")
+def poll_player_commands(request: Request, db: Session = Depends(get_db)):
+    player = agent_player(request, db)
+    queued = db.scalars(select(PlayerCommand).where(PlayerCommand.player_id == player.id, PlayerCommand.status == "queued").order_by(PlayerCommand.created_at)).all()
+    for command in queued: command.status = "delivered"
+    db.commit()
+    return [{"id": command.id, "command": command.command} for command in queued]
+
+
+@router.post("/player-agent/commands/{command_id}/result")
+def player_command_result(command_id: str, payload: CommandResultInput, request: Request, db: Session = Depends(get_db)):
+    player = agent_player(request, db)
+    command = db.get(PlayerCommand, command_id)
+    if not command or command.player_id != player.id:
+        raise HTTPException(status_code=404, detail="Command not found.")
+    command.status, command.result, command.completed_at = payload.status, payload.result, datetime.now(UTC)
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/media/{asset_id}/trash")

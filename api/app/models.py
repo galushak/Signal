@@ -65,7 +65,34 @@ class Player(Timestamped, Base):
     layout_id: Mapped[str | None] = mapped_column(ForeignKey("layouts.id"), nullable=True, index=True)
     health_state: Mapped[str] = mapped_column(String(32), default="never_connected")
     cache_state: Mapped[str] = mapped_column(String(32), default="unknown")
+    device_secret_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    desired_state_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    applied_state_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    runtime_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     building: Mapped[Building] = relationship(back_populates="players")
+
+
+class PlayerEnrollment(Timestamped, Base):
+    __tablename__ = "player_enrollments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    code_hash: Mapped[str] = mapped_column(String(255), index=True)
+    device_identifier: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    player_id: Mapped[str | None] = mapped_column(ForeignKey("players.id"), nullable=True, index=True)
+    credential_delivery_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class PlayerCommand(Timestamped, Base):
+    __tablename__ = "player_commands"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    player_id: Mapped[str] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    command: Mapped[str] = mapped_column(String(48))
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    requested_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MediaFolder(Timestamped, Base):
