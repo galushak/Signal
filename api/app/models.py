@@ -62,6 +62,7 @@ class Player(Timestamped, Base):
     software_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     network_info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     resolution: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    layout_id: Mapped[str | None] = mapped_column(ForeignKey("layouts.id"), nullable=True, index=True)
     health_state: Mapped[str] = mapped_column(String(32), default="never_connected")
     cache_state: Mapped[str] = mapped_column(String(32), default="unknown")
     building: Mapped[Building] = relationship(back_populates="players")
@@ -110,6 +111,103 @@ class MediaAssetTag(Base):
     __tablename__ = "media_asset_tags"
     asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id", ondelete="CASCADE"), primary_key=True)
     tag_id: Mapped[str] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
+
+
+class Layout(Timestamped, Base):
+    __tablename__ = "layouts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160), unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logical_width: Mapped[int] = mapped_column(Integer, default=1920)
+    logical_height: Mapped[int] = mapped_column(Integer, default=1080)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    trashed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    zones: Mapped[list["Zone"]] = relationship(back_populates="layout", cascade="all, delete-orphan")
+
+
+class LayoutVersion(Base):
+    __tablename__ = "layout_versions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    layout_id: Mapped[str] = mapped_column(ForeignKey("layouts.id", ondelete="CASCADE"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    definition: Mapped[dict] = mapped_column(JSON)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("layout_id", "revision", name="uq_layout_revision"),)
+
+
+class Zone(Timestamped, Base):
+    __tablename__ = "zones"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    layout_id: Mapped[str] = mapped_column(ForeignKey("layouts.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    x: Mapped[int] = mapped_column(Integer, default=0)
+    y: Mapped[int] = mapped_column(Integer, default=0)
+    width: Mapped[int] = mapped_column(Integer, default=1920)
+    height: Mapped[int] = mapped_column(Integer, default=1080)
+    z_index: Mapped[int] = mapped_column(Integer, default=0)
+    background: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    border: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    padding: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    layout: Mapped["Layout"] = relationship(back_populates="zones")
+
+
+class Content(Timestamped, Base):
+    __tablename__ = "content"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160))
+    content_type: Mapped[str] = mapped_column(String(48), default="design")
+    scope_type: Mapped[str] = mapped_column(String(32), default="district")
+    scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    trashed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ContentVersion(Base):
+    __tablename__ = "content_versions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    content_id: Mapped[str] = mapped_column(ForeignKey("content.id", ondelete="CASCADE"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(24), default="draft")
+    design_document: Mapped[dict] = mapped_column(JSON)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (UniqueConstraint("content_id", "revision", name="uq_content_revision"),)
+
+
+class ContentAssignment(Timestamped, Base):
+    __tablename__ = "content_assignments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    content_id: Mapped[str] = mapped_column(ForeignKey("content.id", ondelete="CASCADE"), index=True)
+    destination_type: Mapped[str] = mapped_column(String(16))
+    destination_id: Mapped[str] = mapped_column(String(36), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=1)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    transition: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    weekdays: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    daily_start: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    daily_end: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class ContentTemplate(Timestamped, Base):
+    __tablename__ = "content_templates"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160), unique=True)
+    design_document: Mapped[dict] = mapped_column(JSON)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    trashed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
 
 class PermissionGrant(Timestamped, Base):

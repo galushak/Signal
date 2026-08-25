@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app import auth, main, routes
 from app.database import Base, get_db
-from app.models import Building, PermissionGrant, Player, User
+from app.models import AuditEvent, Building, PermissionGrant, Player, User
 
 
 @pytest.fixture()
@@ -87,3 +87,16 @@ def test_permitted_media_upload_is_persistent(client):
     asset = response.json()[0]
     assert asset["processing_state"] == "processing"
     assert test_client.get("/api/v1/media", headers={"Authorization": f"Bearer {token}"}).json()[0]["id"] == asset["id"]
+
+
+def test_admin_can_create_building_and_manual_player_with_audit(client):
+    test_client, _ = client
+    token = login(test_client, "admin")
+    headers = {"Authorization": f"Bearer {token}"}
+    building = test_client.post("/api/v1/buildings", headers=headers, json={"name": "Regression Academy", "description": "Created by regression", "enabled": True})
+    assert building.status_code == 201
+    player = test_client.post("/api/v1/players", headers=headers, json={"name": "Regression Lobby", "building_id": building.json()["id"], "description": "Front entry", "enabled": True})
+    assert player.status_code == 201
+    assert player.json()["health_state"] == "never_connected"
+    events = test_client.get("/api/v1/audit", headers=headers).json()
+    assert {"building.created", "player.created"}.issubset({event["action"] for event in events})

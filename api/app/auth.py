@@ -20,6 +20,15 @@ _attempts: dict[str, list[datetime]] = defaultdict(list)
 _lock = Lock()
 
 
+def utc_datetime(value: datetime) -> datetime:
+    """Treat database timestamps without an offset as UTC.
+
+    PostgreSQL preserves timezone-aware values, while SQLite (used by the
+    isolated test suite) returns the same columns without an offset.
+    """
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def hash_password(password: str) -> str:
     return password_hasher.hash(password)
 
@@ -57,7 +66,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your sign-in session has expired. Please sign in again.") from exc
     session = db.get(AuthSession, claims.get("sid"))
     user = db.get(User, claims.get("sub"))
-    if not session or session.revoked_at or session.expires_at < datetime.now(UTC) or not user or not user.enabled:
+    if not session or session.revoked_at or utc_datetime(session.expires_at) < datetime.now(UTC) or not user or not user.enabled:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your sign-in session is no longer active.")
     return user
 

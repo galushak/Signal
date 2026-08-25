@@ -1,5 +1,5 @@
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 
 from . import auth
 from .audit import record
-from .authorization import BUILDING, DISTRICT, PLAYER, allowed, require, visible_building_ids, visible_player_ids
+from .authorization import BUILDING, DISTRICT, PLAYER, ZONE, allowed, require, visible_building_ids, visible_player_ids
 from .database import get_db
-from .models import AuditEvent, Building, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, Tag, User
+from .models import AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, Tag, User, Zone
 from .settings import get_settings
 from .worker import prepare_media
 
@@ -63,6 +63,57 @@ class PlayerInput(BaseModel):
     description: str | None = None
     enabled: bool = True
     resolution: str | None = None
+    layout_id: str | None = None
+
+
+class LayoutInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str | None = None
+    enabled: bool = True
+    locked: bool = False
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ZoneInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    x: int = Field(default=0, ge=0, le=1919)
+    y: int = Field(default=0, ge=0, le=1079)
+    width: int = Field(default=1920, ge=1, le=1920)
+    height: int = Field(default=1080, ge=1, le=1080)
+    z_index: int = Field(default=0, ge=0, le=99)
+    background: str | None = Field(default=None, max_length=64)
+    border: dict | None = None
+    padding: int = Field(default=0, ge=0, le=200)
+    enabled: bool = True
+    locked: bool = False
+
+
+class ContentInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    content_type: str = "design"
+    scope_type: str = DISTRICT
+    scope_id: str | None = None
+    design_document: dict = Field(default_factory=lambda: {"schema": "signal.design/v1", "canvas": {"width": 1920, "height": 1080}, "elements": []})
+    note: str | None = Field(default=None, max_length=500)
+
+
+class DraftInput(BaseModel):
+    design_document: dict
+    note: str | None = Field(default=None, max_length=500)
+
+
+class AssignmentInput(BaseModel):
+    destination_type: str
+    destination_id: str
+    enabled: bool = True
+    priority: int = Field(default=1, ge=1, le=3)
+    duration_seconds: int | None = Field(default=None, ge=1, le=3600)
+    transition: str | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    weekdays: list[int] | None = None
+    daily_start: str | None = None
+    daily_end: str | None = None
 
 
 class FolderInput(BaseModel):
@@ -83,7 +134,7 @@ def building_data(building: Building) -> dict:
 
 def player_data(player: Player) -> dict:
     connected = player.last_seen_at is not None
-    return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": player.health_state if connected else "never_connected", "cache_state": player.cache_state, "created_at": player.created_at, "updated_at": player.updated_at}
+    return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": player.health_state if connected else "never_connected", "cache_state": player.cache_state, "created_at": player.created_at, "updated_at": player.updated_at}
 
 
 def media_data(asset: MediaAsset, db: Session) -> dict:
@@ -92,14 +143,16 @@ def media_data(asset: MediaAsset, db: Session) -> dict:
 
 
 def scope_valid(scope_type: str, scope_id: str | None, db: Session) -> None:
-    if scope_type not in {DISTRICT, BUILDING, PLAYER}:
-        raise HTTPException(status_code=422, detail="Choose District, Building, or Player for access.")
+    if scope_type not in {DISTRICT, BUILDING, PLAYER, ZONE}:
+        raise HTTPException(status_code=422, detail="Choose District, Building, Player, or Zone for access.")
     if scope_type == DISTRICT and scope_id is not None:
         raise HTTPException(status_code=422, detail="District access does not need a specific item.")
     if scope_type == BUILDING and (not scope_id or not db.get(Building, scope_id)):
         raise HTTPException(status_code=422, detail="Choose a valid building.")
     if scope_type == PLAYER and (not scope_id or not db.get(Player, scope_id)):
         raise HTTPException(status_code=422, detail="Choose a valid player.")
+    if scope_type == ZONE and (not scope_id or not db.get(Zone, scope_id)):
+        raise HTTPException(status_code=422, detail="Choose a valid zone.")
 
 
 def media_type_for(upload: UploadFile) -> str:
@@ -203,7 +256,8 @@ def list_players(user: User = Depends(auth.get_current_user), db: Session = Depe
 @router.post("/players", status_code=201)
 def create_player(payload: PlayerInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     scope_valid(BUILDING, payload.building_id, db); require(user, "manage_players", BUILDING, payload.building_id, db)
-    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, enabled=payload.enabled, resolution=payload.resolution)
+    if payload.layout_id and not db.get(Layout, payload.layout_id): raise HTTPException(status_code=422, detail="Choose a valid layout.")
+    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, enabled=payload.enabled, resolution=payload.resolution, layout_id=payload.layout_id)
     db.add(player); db.flush()
     record(db, actor=user, action="player.created", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
     db.commit(); db.refresh(player); return player_data(player)
@@ -214,7 +268,8 @@ def update_player(player_id: str, payload: PlayerInput, request: Request, user: 
     player = db.get(Player, player_id)
     if not player: raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "manage_players", PLAYER, player.id, db); scope_valid(BUILDING, payload.building_id, db)
-    player.name, player.building_id, player.description, player.enabled, player.resolution = payload.name.strip(), payload.building_id, payload.description, payload.enabled, payload.resolution
+    if payload.layout_id and not db.get(Layout, payload.layout_id): raise HTTPException(status_code=422, detail="Choose a valid layout.")
+    player.name, player.building_id, player.description, player.enabled, player.resolution, player.layout_id = payload.name.strip(), payload.building_id, payload.description, payload.enabled, payload.resolution, payload.layout_id
     record(db, actor=user, action="player.updated", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
     db.commit(); db.refresh(player); return player_data(player)
 
@@ -304,6 +359,8 @@ def list_media(search: str | None = None, media_type: str | None = None, include
 
 @router.post("/media/upload", status_code=201)
 async def upload_media(request: Request, files: Annotated[list[UploadFile], File(...)], scope_type: Annotated[str, Form()] = DISTRICT, scope_id: Annotated[str | None, Form()] = None, folder_id: Annotated[str | None, Form()] = None, tags: Annotated[str | None, Form()] = None, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    scope_id = scope_id or None
+    folder_id = folder_id or None
     scope_valid(scope_type, scope_id, db); require(user, "upload_media", scope_type, scope_id, db)
     if folder_id and not db.get(MediaFolder, folder_id): raise HTTPException(status_code=422, detail="Choose a valid folder.")
     results = []
@@ -370,3 +427,184 @@ def audit_events(limit: int = 100, user: User = Depends(auth.get_current_user), 
     require(user, "view_audit_log", DISTRICT, None, db)
     events = db.scalars(select(AuditEvent).order_by(AuditEvent.timestamp.desc()).limit(min(max(limit, 1), 500))).all()
     return [{"id": item.id, "timestamp": item.timestamp, "action": item.action, "resource_type": item.resource_type, "resource_id": item.resource_id, "resource_name": item.resource_name, "scope_type": item.scope_type, "scope_id": item.scope_id, "metadata": item.metadata_json} for item in events]
+
+
+def zone_data(zone: Zone) -> dict:
+    return {"id": zone.id, "layout_id": zone.layout_id, "name": zone.name, "x": zone.x, "y": zone.y, "width": zone.width, "height": zone.height, "z_index": zone.z_index, "background": zone.background, "border": zone.border, "padding": zone.padding, "enabled": zone.enabled, "locked": zone.locked}
+
+
+def layout_definition(layout: Layout) -> dict:
+    return {"schema": "signal.layout/v1", "canvas": {"width": layout.logical_width, "height": layout.logical_height}, "locked": layout.locked, "zones": [zone_data(zone) for zone in sorted(layout.zones, key=lambda item: (item.z_index, item.name))]}
+
+
+def layout_data(layout: Layout) -> dict:
+    return {"id": layout.id, "name": layout.name, "description": layout.description, "logical_width": layout.logical_width, "logical_height": layout.logical_height, "enabled": layout.enabled, "locked": layout.locked, "created_at": layout.created_at, "updated_at": layout.updated_at, "zones": [zone_data(zone) for zone in sorted(layout.zones, key=lambda item: (item.z_index, item.name))]}
+
+
+def content_data(item: Content, db: Session) -> dict:
+    versions = db.scalars(select(ContentVersion).where(ContentVersion.content_id == item.id).order_by(ContentVersion.revision.desc())).all()
+    published = next((version for version in versions if version.state == "published"), None)
+    draft = next((version for version in versions if version.state == "draft"), None)
+    return {"id": item.id, "name": item.name, "content_type": item.content_type, "scope_type": item.scope_type, "scope_id": item.scope_id, "created_by_id": item.created_by_id, "created_at": item.created_at, "updated_at": item.updated_at, "trashed_at": item.trashed_at, "published_version": version_data(published) if published else None, "draft_version": version_data(draft) if draft else None}
+
+
+def version_data(version: ContentVersion | None) -> dict | None:
+    if not version: return None
+    return {"id": version.id, "revision": version.revision, "state": version.state, "design_document": version.design_document, "note": version.note, "created_by_id": version.created_by_id, "created_at": version.created_at, "published_at": version.published_at}
+
+
+def assignment_data(item: ContentAssignment) -> dict:
+    return {"id": item.id, "content_id": item.content_id, "destination_type": item.destination_type, "destination_id": item.destination_id, "enabled": item.enabled, "priority": item.priority, "duration_seconds": item.duration_seconds, "transition": item.transition, "starts_at": item.starts_at, "ends_at": item.ends_at, "weekdays": item.weekdays, "daily_start": item.daily_start, "daily_end": item.daily_end}
+
+
+@router.get("/layouts")
+def list_layouts(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_layouts", DISTRICT, None, db)
+    return [layout_data(item) for item in db.scalars(select(Layout).where(Layout.trashed_at.is_(None)).order_by(Layout.name))]
+
+
+@router.post("/layouts", status_code=201)
+def create_layout(payload: LayoutInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_layouts", DISTRICT, None, db)
+    if db.scalar(select(Layout).where(Layout.name == payload.name.strip())): raise HTTPException(status_code=409, detail="A layout with that name already exists.")
+    layout = Layout(name=payload.name.strip(), description=payload.description, enabled=payload.enabled, locked=payload.locked, created_by_id=user.id)
+    db.add(layout); db.flush(); db.add(LayoutVersion(layout_id=layout.id, revision=1, definition=layout_definition(layout), note=payload.note, created_by_id=user.id))
+    record(db, actor=user, action="layout.created", resource_type="layout", resource_id=layout.id, resource_name=layout.name, source_ip=auth.client_ip(request)); db.commit(); db.refresh(layout)
+    return layout_data(layout)
+
+
+@router.patch("/layouts/{layout_id}")
+def update_layout(layout_id: str, payload: LayoutInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_layouts", DISTRICT, None, db); layout = db.get(Layout, layout_id)
+    if not layout or layout.trashed_at: raise HTTPException(status_code=404, detail="Layout not found.")
+    layout.name, layout.description, layout.enabled, layout.locked = payload.name.strip(), payload.description, payload.enabled, payload.locked
+    revision = (db.scalar(select(func.max(LayoutVersion.revision)).where(LayoutVersion.layout_id == layout.id)) or 0) + 1
+    db.add(LayoutVersion(layout_id=layout.id, revision=revision, definition=layout_definition(layout), note=payload.note, created_by_id=user.id)); record(db, actor=user, action="layout.updated", resource_type="layout", resource_id=layout.id, resource_name=layout.name, source_ip=auth.client_ip(request)); db.commit(); db.refresh(layout); return layout_data(layout)
+
+
+@router.get("/layouts/{layout_id}/versions")
+def list_layout_versions(layout_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_layouts", DISTRICT, None, db); return [{"id": item.id, "revision": item.revision, "definition": item.definition, "note": item.note, "created_at": item.created_at} for item in db.scalars(select(LayoutVersion).where(LayoutVersion.layout_id == layout_id).order_by(LayoutVersion.revision.desc()))]
+
+
+@router.post("/layouts/{layout_id}/restore/{revision}")
+def restore_layout(layout_id: str, revision: int, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_layouts", DISTRICT, None, db); layout = db.get(Layout, layout_id); prior = db.scalar(select(LayoutVersion).where(LayoutVersion.layout_id == layout_id, LayoutVersion.revision == revision))
+    if not layout or not prior: raise HTTPException(status_code=404, detail="Layout revision not found.")
+    for zone in list(layout.zones): db.delete(zone)
+    for source in prior.definition.get("zones", []): db.add(Zone(layout_id=layout.id, name=source["name"], x=source["x"], y=source["y"], width=source["width"], height=source["height"], z_index=source.get("z_index", 0), background=source.get("background"), border=source.get("border"), padding=source.get("padding", 0), enabled=source.get("enabled", True), locked=source.get("locked", False)))
+    db.flush(); next_revision = (db.scalar(select(func.max(LayoutVersion.revision)).where(LayoutVersion.layout_id == layout.id)) or 0) + 1; db.add(LayoutVersion(layout_id=layout.id, revision=next_revision, definition=layout_definition(layout), note=f"Restored revision {revision}", created_by_id=user.id)); record(db, actor=user, action="layout.restored", resource_type="layout", resource_id=layout.id, resource_name=layout.name, source_ip=auth.client_ip(request), metadata={"from_revision": revision}); db.commit(); return layout_data(layout)
+
+
+@router.post("/layouts/{layout_id}/zones", status_code=201)
+def create_zone(layout_id: str, payload: ZoneInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_layouts", DISTRICT, None, db); layout = db.get(Layout, layout_id)
+    if not layout or layout.trashed_at: raise HTTPException(status_code=404, detail="Layout not found.")
+    if payload.x + payload.width > layout.logical_width or payload.y + payload.height > layout.logical_height: raise HTTPException(status_code=422, detail="Zone must fit within the 1920 × 1080 layout.")
+    zone = Zone(layout_id=layout.id, **payload.model_dump()); db.add(zone); db.flush(); record(db, actor=user, action="zone.created", resource_type="zone", resource_id=zone.id, resource_name=zone.name, scope_type=ZONE, scope_id=zone.id, source_ip=auth.client_ip(request)); db.commit(); return zone_data(zone)
+
+
+@router.patch("/zones/{zone_id}")
+def update_zone(zone_id: str, payload: ZoneInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    zone = db.get(Zone, zone_id)
+    if not zone: raise HTTPException(status_code=404, detail="Zone not found.")
+    require(user, "manage_layouts", DISTRICT, None, db)
+    if payload.x + payload.width > 1920 or payload.y + payload.height > 1080: raise HTTPException(status_code=422, detail="Zone must fit within the layout.")
+    for key, value in payload.model_dump().items(): setattr(zone, key, value)
+    record(db, actor=user, action="zone.updated", resource_type="zone", resource_id=zone.id, resource_name=zone.name, scope_type=ZONE, scope_id=zone.id, source_ip=auth.client_ip(request)); db.commit(); return zone_data(zone)
+
+
+@router.delete("/zones/{zone_id}")
+def delete_zone(zone_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    zone = db.get(Zone, zone_id)
+    if not zone: raise HTTPException(status_code=404, detail="Zone not found.")
+    require(user, "manage_layouts", DISTRICT, None, db); assigned = db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.destination_type == ZONE, ContentAssignment.destination_id == zone.id)); db.delete(zone); record(db, actor=user, action="zone.deleted", resource_type="zone", resource_id=zone_id, resource_name=zone.name, scope_type=ZONE, scope_id=zone_id, source_ip=auth.client_ip(request), metadata={"assignment_count": assigned}); db.commit(); return {"ok": True, "affected_assignments": assigned}
+
+
+def valid_design(document: dict) -> None:
+    if document.get("schema") != "signal.design/v1" or not isinstance(document.get("elements"), list): raise HTTPException(status_code=422, detail="Use a Signal design document with an elements list.")
+    ids = [element.get("id") for element in document["elements"]]
+    if any(not isinstance(element_id, str) or not element_id for element_id in ids) or len(ids) != len(set(ids)): raise HTTPException(status_code=422, detail="Every design element needs a stable unique ID.")
+
+
+def content_for_user(content_id: str, capability: str, user: User, db: Session) -> Content:
+    item = db.get(Content, content_id)
+    if not item or item.trashed_at: raise HTTPException(status_code=404, detail="Content not found.")
+    require(user, capability, item.scope_type, item.scope_id, db); return item
+
+
+@router.get("/content")
+def list_content(include_trashed: bool = False, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    query = select(Content).order_by(Content.updated_at.desc())
+    if not include_trashed: query = query.where(Content.trashed_at.is_(None))
+    return [content_data(item, db) for item in db.scalars(query) if allowed(user, "view", item.scope_type, item.scope_id, db)]
+
+
+@router.post("/content", status_code=201)
+def create_content(payload: ContentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    scope_valid(payload.scope_type, payload.scope_id, db); require(user, "create_content", payload.scope_type, payload.scope_id, db); valid_design(payload.design_document)
+    item = Content(name=payload.name.strip(), content_type=payload.content_type, scope_type=payload.scope_type, scope_id=payload.scope_id, created_by_id=user.id); db.add(item); db.flush(); version = ContentVersion(content_id=item.id, revision=1, state="draft", design_document=payload.design_document, note=payload.note, created_by_id=user.id); db.add(version); record(db, actor=user, action="content.created", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request)); db.commit(); return content_data(item, db)
+
+
+@router.get("/content/{content_id}/versions")
+def list_content_versions(content_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    content_for_user(content_id, "view", user, db); return [version_data(item) for item in db.scalars(select(ContentVersion).where(ContentVersion.content_id == content_id).order_by(ContentVersion.revision.desc()))]
+
+
+@router.post("/content/{content_id}/draft")
+def save_draft(content_id: str, payload: DraftInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = content_for_user(content_id, "edit_content", user, db); valid_design(payload.design_document); existing = db.scalar(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "draft"))
+    if existing: existing.design_document, existing.note = payload.design_document, payload.note; version = existing
+    else:
+        revision = (db.scalar(select(func.max(ContentVersion.revision)).where(ContentVersion.content_id == item.id)) or 0) + 1; version = ContentVersion(content_id=item.id, revision=revision, state="draft", design_document=payload.design_document, note=payload.note, created_by_id=user.id); db.add(version)
+    record(db, actor=user, action="content.draft_saved", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request)); db.commit(); return version_data(version)
+
+
+@router.post("/content/{content_id}/publish")
+def publish_content(content_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = content_for_user(content_id, "publish", user, db); draft = db.scalar(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "draft"))
+    if not draft: raise HTTPException(status_code=409, detail="There are no draft changes to publish.")
+    for prior in db.scalars(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "published")): prior.state = "superseded"
+    draft.state, draft.published_at = "published", datetime.now(UTC); record(db, actor=user, action="content.published", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"revision": draft.revision}); db.commit(); return version_data(draft)
+
+
+@router.post("/content/{content_id}/restore/{revision}")
+def restore_content(content_id: str, revision: int, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = content_for_user(content_id, "restore_versions", user, db); prior = db.scalar(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.revision == revision))
+    if not prior: raise HTTPException(status_code=404, detail="Content revision not found.")
+    if db.scalar(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "draft")): raise HTTPException(status_code=409, detail="Discard or save the current draft before restoring a revision.")
+    next_revision = (db.scalar(select(func.max(ContentVersion.revision)).where(ContentVersion.content_id == item.id)) or 0) + 1; version = ContentVersion(content_id=item.id, revision=next_revision, state="draft", design_document=prior.design_document, note=f"Restored from revision {revision}", created_by_id=user.id); db.add(version); record(db, actor=user, action="content.restored", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"from_revision": revision}); db.commit(); return version_data(version)
+
+
+@router.post("/content/{content_id}/assignments", status_code=201)
+def create_assignment(content_id: str, payload: AssignmentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = content_for_user(content_id, "schedule", user, db)
+    if payload.destination_type not in {PLAYER, ZONE}: raise HTTPException(status_code=422, detail="Choose a player or zone destination.")
+    scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
+    if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
+    if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
+    if payload.weekdays and any(day not in range(7) for day in payload.weekdays): raise HTTPException(status_code=422, detail="Weekdays must be numbers from 0 (Monday) to 6 (Sunday).")
+    assignment = ContentAssignment(content_id=item.id, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); record(db, actor=user, action="assignment.created", resource_type="assignment", resource_id=assignment.id, resource_name=item.name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request)); db.commit(); return assignment_data(assignment)
+
+
+def eligible(assignment: ContentAssignment, now: datetime) -> bool:
+    if not assignment.enabled or (assignment.starts_at and assignment.starts_at > now) or (assignment.ends_at and assignment.ends_at <= now): return False
+    if assignment.weekdays and now.weekday() not in assignment.weekdays: return False
+    current = now.time().replace(tzinfo=None)
+    try:
+        if assignment.daily_start and current < time.fromisoformat(assignment.daily_start): return False
+        if assignment.daily_end and current >= time.fromisoformat(assignment.daily_end): return False
+    except ValueError: return False
+    return True
+
+
+@router.get("/players/{player_id}/preview")
+def player_preview(player_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player: raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "view", PLAYER, player.id, db); layout = db.get(Layout, player.layout_id) if player.layout_id else None; now = datetime.now(UTC); destinations = [player.id] + ([zone.id for zone in layout.zones if zone.enabled] if layout else [])
+    items = []
+    for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))):
+        content = db.get(Content, assignment.content_id); published = db.scalar(select(ContentVersion).where(ContentVersion.content_id == assignment.content_id, ContentVersion.state == "published"))
+        if content and published and eligible(assignment, now): items.append({"assignment": assignment_data(assignment), "content": {"id": content.id, "name": content.name, "revision": version_data(published)}, "destination_type": assignment.destination_type})
+    return {"kind": "server_desired_state", "player": player_data(player), "layout": layout_data(layout) if layout else None, "eligible_assignments": sorted(items, key=lambda item: item["assignment"]["priority"], reverse=True), "generated_at": now}

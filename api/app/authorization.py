@@ -2,11 +2,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import PermissionGrant, Player, User
+from .models import PermissionGrant, Player, User, Zone
 
 DISTRICT = "district"
 BUILDING = "building"
 PLAYER = "player"
+ZONE = "zone"
 
 
 def _matches_scope(grant: PermissionGrant, scope_type: str, scope_id: str | None, db: Session) -> bool:
@@ -17,6 +18,14 @@ def _matches_scope(grant: PermissionGrant, scope_type: str, scope_id: str | None
     if grant.scope_type == BUILDING and scope_type == PLAYER:
         player = db.get(Player, scope_id)
         return bool(player and player.building_id == grant.scope_id)
+    if scope_type == ZONE:
+        zone = db.get(Zone, scope_id)
+        if not zone:
+            return False
+        if grant.scope_type == PLAYER:
+            return bool(db.scalar(select(Player.id).where(Player.id == grant.scope_id, Player.layout_id == zone.layout_id)))
+        if grant.scope_type == BUILDING:
+            return bool(db.scalar(select(Player.id).where(Player.building_id == grant.scope_id, Player.layout_id == zone.layout_id)))
     return False
 
 
