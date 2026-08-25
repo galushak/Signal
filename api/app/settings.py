@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     media_root: Path = Path("/data/media")
     backup_root: Path = Path("/data/backups")
-    cors_origins: str = "http://localhost:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 480

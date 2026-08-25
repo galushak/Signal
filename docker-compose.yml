@@ -25,7 +25,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       MEDIA_ROOT: /data/media
       BACKUP_ROOT: /data/backups
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
     volumes:
       - media_data:/data/media

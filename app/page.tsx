@@ -3,7 +3,11 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { SignalDesigner, type DesignerDocument } from "./Designer";
 
-const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000/api/v1";
+const API =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  (typeof window === "undefined"
+    ? "http://localhost:8000/api/v1"
+    : `${window.location.protocol}//${window.location.hostname}:8000/api/v1`);
 type User = {
   id: string;
   username: string;
