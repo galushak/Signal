@@ -68,7 +68,21 @@ type DesignDocument = {
   canvas: { width: number; height: number };
   elements: DesignElement[];
 };
-type DesignElement = { id: string; type: string; text?: string; x: number; y: number; width: number; height: number; z_index?: number; locked?: boolean; opacity?: number; url?: string; media_id?: string; style?: Record<string, string | number> };
+type DesignElement = {
+  id: string;
+  type: string;
+  text?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  z_index?: number;
+  locked?: boolean;
+  opacity?: number;
+  url?: string;
+  media_id?: string;
+  style?: Record<string, string | number>;
+};
 type Media = {
   id: string;
   display_name: string;
@@ -80,6 +94,15 @@ type Media = {
   tags: string[];
   thumbnail_url?: string;
 };
+type LibraryItem = {
+  id: string;
+  kind: "design" | "image" | "video" | "pdf";
+  name: string;
+  status: string;
+  updated_at: string;
+  thumbnail_url?: string;
+  tags?: string[];
+};
 type Dashboard = {
   players_total: number;
   players_online: number;
@@ -89,12 +112,70 @@ type Dashboard = {
 };
 
 function designFor(template: string): DesignDocument {
-  const base = { schema: "signal.design/v1" as const, canvas: { width: 1920, height: 1080 } };
-  const element = (type: string, text: string, x: number, y: number, width: number, height: number): DesignElement => ({ id: crypto.randomUUID(), type, text, x, y, width, height, z_index: 1 });
-  if (template === "event") return { ...base, elements: [element("shape", "", 0, 0, 1920, 1080), element("text", "Event title", 140, 180, 1500, 170), element("text", "Date · Time · Location", 140, 410, 1200, 100)] };
-  if (template === "menu") return { ...base, elements: [element("text", "Monday Lunch Menu", 130, 90, 1500, 140), element("text", "Entrée\nAlternative\nSides\nFruit\nNotes", 170, 310, 1400, 520)] };
-  if (template === "announcement") return { ...base, elements: [element("text", "New announcement", 120, 120, 1500, 160), element("text", "Add the details your school community needs.", 120, 360, 1400, 140)] };
-  return { ...base, elements: [element("text", "New content", 120, 120, 1200, 160)] };
+  const base = {
+    schema: "signal.design/v1" as const,
+    canvas: { width: 1920, height: 1080 },
+  };
+  const element = (
+    type: string,
+    text: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): DesignElement => ({
+    id: crypto.randomUUID(),
+    type,
+    text,
+    x,
+    y,
+    width,
+    height,
+    z_index: 1,
+  });
+  if (template === "event")
+    return {
+      ...base,
+      elements: [
+        element("shape", "", 0, 0, 1920, 1080),
+        element("text", "Event title", 140, 180, 1500, 170),
+        element("text", "Date · Time · Location", 140, 410, 1200, 100),
+      ],
+    };
+  if (template === "menu")
+    return {
+      ...base,
+      elements: [
+        element("text", "Monday Lunch Menu", 130, 90, 1500, 140),
+        element(
+          "text",
+          "Entrée\nAlternative\nSides\nFruit\nNotes",
+          170,
+          310,
+          1400,
+          520,
+        ),
+      ],
+    };
+  if (template === "announcement")
+    return {
+      ...base,
+      elements: [
+        element("text", "New announcement", 120, 120, 1500, 160),
+        element(
+          "text",
+          "Add the details your school community needs.",
+          120,
+          360,
+          1400,
+          140,
+        ),
+      ],
+    };
+  return {
+    ...base,
+    elements: [element("text", "New content", 120, 120, 1200, 160)],
+  };
 }
 
 async function request(
@@ -118,6 +199,7 @@ export default function Home() {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [view, setView] = useState("dashboard");
+  const [libraryDesignId, setLibraryDesignId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   useEffect(() => {
     const saved = localStorage.getItem("signal_token");
@@ -151,6 +233,10 @@ export default function Home() {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 4000);
   };
+  const openLibraryDesign = useCallback((id: string) => {
+    setLibraryDesignId(id);
+    setView("content");
+  }, []);
   const navigation = [
     ["dashboard", "▦", "Dashboard"],
     ["content", "✦", "Content"],
@@ -226,8 +312,21 @@ export default function Home() {
         </header>
         <div className="page">
           {view === "dashboard" && <DashboardView token={token} />}
-          {view === "content" && <ContentView token={token} notify={show} />}
-          {view === "media" && <MediaView token={token} notify={show} />}
+          {view === "content" && (
+            <ContentView
+              token={token}
+              notify={show}
+              initialContentId={libraryDesignId}
+              onInitialContentOpened={() => setLibraryDesignId(null)}
+            />
+          )}
+          {view === "media" && (
+            <MediaView
+              token={token}
+              notify={show}
+              onOpenDesign={openLibraryDesign}
+            />
+          )}
           {view === "players" && <PlayersView token={token} notify={show} />}
           {view === "buildings" && (
             <BuildingsView token={token} notify={show} />
@@ -432,23 +531,33 @@ function Stat({
 function MediaView({
   token,
   notify,
+  onOpenDesign,
 }: {
   token: string;
   notify: (m: string) => void;
+  onOpenDesign: (id: string) => void;
 }) {
-  const [media, setMedia] = useState<Media[]>([]);
+  const [library, setLibrary] = useState<LibraryItem[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
+  const [kind, setKind] = useState("all");
+  const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const reload = useCallback(
     () =>
-      Promise.all([request("/media", token), request("/players", token)])
-        .then(([assets, visiblePlayers]) => {
-          setMedia(assets);
+      Promise.all([
+        request(
+          `/library?kind=${kind}&search=${encodeURIComponent(search)}`,
+          token,
+        ),
+        request("/players", token),
+      ])
+        .then(([items, visiblePlayers]) => {
+          setLibrary(items);
           setPlayers(visiblePlayers);
         })
         .catch((e) => setError(e.message)),
-    [token],
+    [token, kind, search],
   );
   useEffect(() => {
     reload();
@@ -483,7 +592,9 @@ function MediaView({
         <div>
           <p className="eyebrow">MEDIA LIBRARY</p>
           <h1>Media</h1>
-          <p>Only media within your access is shown here.</p>
+          <p>
+            Images, video, PDFs, and editable Signal designs within your access.
+          </p>
         </div>
       </div>
       <section className="panel upload-panel">
@@ -521,27 +632,63 @@ function MediaView({
           </button>
         </form>
       </section>
+      <section className="panel library-filter">
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search designs, files, and tags"
+        />
+        <div className="button-row">
+          {["all", "design", "image", "video", "pdf"].map((item) => (
+            <button
+              key={item}
+              className={kind === item ? "primary" : "secondary-button"}
+              onClick={() => setKind(item)}
+            >
+              {item === "all"
+                ? "All"
+                : item === "design"
+                  ? "Designs"
+                  : `${item[0].toUpperCase()}${item.slice(1)}s`}
+            </button>
+          ))}
+        </div>
+      </section>
       {error && <ErrorState message={error} />}
       {!error && (
         <section className="media-grid real-media">
-          {media.length ? (
-            media.map((asset) => (
-              <article className="media-item" key={asset.id}>
+          {library.length ? (
+            library.map((asset) => (
+              <article className="media-item" key={`${asset.kind}-${asset.id}`}>
                 <div className="asset art-3">
-                  <span>
-                    {asset.media_type === "pdf"
-                      ? "PDF"
-                      : asset.media_type === "video"
-                        ? "▶"
-                        : "IMG"}
-                  </span>
+                  {asset.thumbnail_url ? (
+                    <img src={`${API}${asset.thumbnail_url}`} alt="" />
+                  ) : (
+                    <span>
+                      {asset.kind === "design"
+                        ? "DESIGN"
+                        : asset.kind === "pdf"
+                          ? "PDF"
+                          : asset.kind === "video"
+                            ? "▶"
+                            : "IMG"}
+                    </span>
+                  )}
                 </div>
-                <b>{asset.display_name}</b>
+                <b>{asset.name}</b>
                 <small>
-                  {asset.processing_state === "failed"
-                    ? `Failed: ${asset.processing_error}`
-                    : `${asset.media_type} · ${asset.processing_state}`}
+                  {asset.kind === "design"
+                    ? `Design · ${asset.status}`
+                    : `${asset.kind} · ${asset.status}`}
                 </small>
+                {asset.kind === "design" && (
+                  <button
+                    className="secondary-button"
+                    onClick={() => onOpenDesign(asset.id)}
+                  >
+                    Open in Designer
+                  </button>
+                )}
               </article>
             ))
           ) : (
@@ -608,11 +755,16 @@ function PlayersView({
           <h1>Players</h1>
           <p>Player status is reported by real devices only.</p>
         </div>
-        <button className="primary" onClick={() => setShowEnrollment(true)}>Enroll Display</button>
+        <button className="primary" onClick={() => setShowEnrollment(true)}>
+          Enroll Display
+        </button>
       </div>
       <details className="panel create-panel placeholder-player">
         <summary>Add Placeholder Display</summary>
-        <p>Use this only for a record without a physical Signal Player. Real devices should be enrolled above.</p>
+        <p>
+          Use this only for a record without a physical Signal Player. Real
+          devices should be enrolled above.
+        </p>
         <form onSubmit={add} className="inline-form">
           <input name="name" placeholder="e.g. HS Cafeteria" required />
           <select name="building_id" required defaultValue="">
@@ -667,31 +819,205 @@ function PlayersView({
           )}
         </section>
       )}
-      {showEnrollment && <EnrollmentDialog token={token} onClose={() => setShowEnrollment(false)} onEnrolled={(name) => { setShowEnrollment(false); notify(`${name} enrolled successfully.`); reload(); }} />}
+      {showEnrollment && (
+        <EnrollmentDialog
+          token={token}
+          onClose={() => setShowEnrollment(false)}
+          onEnrolled={(name) => {
+            setShowEnrollment(false);
+            notify(`${name} enrolled successfully.`);
+            reload();
+          }}
+        />
+      )}
     </>
   );
 }
 
-function EnrollmentDialog({ token, onClose, onEnrolled }: { token: string; onClose: () => void; onEnrolled: (name: string) => void }) {
+function EnrollmentDialog({
+  token,
+  onClose,
+  onEnrolled,
+}: {
+  token: string;
+  onClose: () => void;
+  onEnrolled: (name: string) => void;
+}) {
   const [step, setStep] = useState<"code" | "setup">("code");
   const [code, setCode] = useState("");
-  const [options, setOptions] = useState<{ buildings: Building[]; layouts: Layout[] }>({ buildings: [], layouts: [] });
+  const [options, setOptions] = useState<{
+    buildings: Building[];
+    layouts: Layout[];
+  }>({ buildings: [], layouts: [] });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const continueCode = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setBusy(true); setError("");
+    event.preventDefault();
+    setBusy(true);
+    setError("");
     try {
-      const result = await request("/player-enrollments/validate", token, { method: "POST", body: JSON.stringify({ code: code.toUpperCase() }) });
-      if (result.status !== "valid") { setError(result.status === "expired" ? "This enrollment code has expired. Check the display for its new code." : result.status === "used" ? "This enrollment code has already been used." : "We couldn't find that enrollment code."); return; }
-      setOptions(await request("/player-enrollments/options", token)); setStep("setup");
-    } catch { setError("We couldn't validate that enrollment code. Check your permission and try again."); } finally { setBusy(false); }
+      const result = await request("/player-enrollments/validate", token, {
+        method: "POST",
+        body: JSON.stringify({ code: code.toUpperCase() }),
+      });
+      if (result.status !== "valid") {
+        setError(
+          result.status === "expired"
+            ? "This enrollment code has expired. Check the display for its new code."
+            : result.status === "used"
+              ? "This enrollment code has already been used."
+              : "We couldn't find that enrollment code.",
+        );
+        return;
+      }
+      setOptions(await request("/player-enrollments/options", token));
+      setStep("setup");
+    } catch {
+      setError(
+        "We couldn't validate that enrollment code. Check your permission and try again.",
+      );
+    } finally {
+      setBusy(false);
+    }
   };
   const claim = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError("");
-    try { await request("/players/enroll", token, { method: "POST", body: JSON.stringify({ code: code.toUpperCase(), name: form.get("name"), building_id: form.get("building_id"), layout_id: form.get("layout_id") || null, description: form.get("description") || null }) }); onEnrolled(String(form.get("name"))); }
-    catch (e) { const message = e instanceof Error ? e.message : "Unable to enroll display."; setError(message.includes("expired") ? "This enrollment code has expired. Check the display for its new code." : message.includes("already been used") ? "This enrollment code has already been used." : "We couldn't enroll this display. Please check the details and try again."); } finally { setBusy(false); }
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError("");
+    try {
+      await request("/players/enroll", token, {
+        method: "POST",
+        body: JSON.stringify({
+          code: code.toUpperCase(),
+          name: form.get("name"),
+          building_id: form.get("building_id"),
+          layout_id: form.get("layout_id") || null,
+          description: form.get("description") || null,
+        }),
+      });
+      onEnrolled(String(form.get("name")));
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "Unable to enroll display.";
+      setError(
+        message.includes("expired")
+          ? "This enrollment code has expired. Check the display for its new code."
+          : message.includes("already been used")
+            ? "This enrollment code has already been used."
+            : "We couldn't enroll this display. Please check the details and try again.",
+      );
+    } finally {
+      setBusy(false);
+    }
   };
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="enroll-title"><header><div><p className="eyebrow">DISPLAYS</p><h2 id="enroll-title">Enroll a Display</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header>{step === "code" ? <form onSubmit={continueCode}><label>Enrollment code<input autoFocus value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} placeholder="523-UKJ" required /></label><p>The enrollment code is shown on the display you want to add.</p>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Checking…" : "Continue"}</button></footer></form> : <form onSubmit={claim}><div className="enrollment-code">Code: <b>{code} ✓</b></div><label>Display name<input name="name" placeholder="HS Cafeteria" required autoFocus /></label><label>Building<select name="building_id" required defaultValue=""><option value="" disabled>Choose building</option>{options.buildings.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Layout <small>(recommended)</small><select name="layout_id" defaultValue=""><option value="">Assign later</option>{options.layouts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Location <small>(optional)</small><input name="description" placeholder="Serving line" /></label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={() => setStep("code")}>Back</button><button className="primary" disabled={busy || !options.buildings.length}>{busy ? "Enrolling…" : "Enroll Display"}</button></footer></form>}</section></div>;
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="enrollment-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="enroll-title"
+      >
+        <header>
+          <div>
+            <p className="eyebrow">DISPLAYS</p>
+            <h2 id="enroll-title">Enroll a Display</h2>
+          </div>
+          <button className="close" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </header>
+        {step === "code" ? (
+          <form onSubmit={continueCode}>
+            <label>
+              Enrollment code
+              <input
+                autoFocus
+                value={code}
+                onChange={(event) => setCode(event.target.value.toUpperCase())}
+                placeholder="523-UKJ"
+                required
+              />
+            </label>
+            <p>The enrollment code is shown on the display you want to add.</p>
+            {error && <p className="enrollment-error">{error}</p>}
+            <footer>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onClose}
+              >
+                Cancel
+              </button>
+              <button className="primary" disabled={busy}>
+                {busy ? "Checking…" : "Continue"}
+              </button>
+            </footer>
+          </form>
+        ) : (
+          <form onSubmit={claim}>
+            <div className="enrollment-code">
+              Code: <b>{code} ✓</b>
+            </div>
+            <label>
+              Display name
+              <input
+                name="name"
+                placeholder="HS Cafeteria"
+                required
+                autoFocus
+              />
+            </label>
+            <label>
+              Building
+              <select name="building_id" required defaultValue="">
+                <option value="" disabled>
+                  Choose building
+                </option>
+                {options.buildings.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Layout <small>(recommended)</small>
+              <select name="layout_id" defaultValue="">
+                <option value="">Assign later</option>
+                {options.layouts.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Location <small>(optional)</small>
+              <input name="description" placeholder="Serving line" />
+            </label>
+            {error && <p className="enrollment-error">{error}</p>}
+            <footer>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setStep("code")}
+              >
+                Back
+              </button>
+              <button
+                className="primary"
+                disabled={busy || !options.buildings.length}
+              >
+                {busy ? "Enrolling…" : "Enroll Display"}
+              </button>
+            </footer>
+          </form>
+        )}
+      </section>
+    </div>
+  );
 }
 
 function BuildingsView({
@@ -920,9 +1246,13 @@ function LayoutsView({
 function ContentView({
   token,
   notify,
+  initialContentId,
+  onInitialContentOpened,
 }: {
   token: string;
   notify: (m: string) => void;
+  initialContentId: string | null;
+  onInitialContentOpened: () => void;
 }) {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [selected, setSelected] = useState<ContentItem | null>(null);
@@ -934,13 +1264,22 @@ function ContentView({
       request("/content", token)
         .then((next: ContentItem[]) => {
           setItems(next);
+          const requested = initialContentId
+            ? next.find((item) => item.id === initialContentId)
+            : null;
+          if (requested) {
+            setSelected(requested);
+            setEditing(true);
+            onInitialContentOpened();
+            return;
+          }
           setSelected(
             (current) =>
               next.find((item) => item.id === current?.id) || next[0] || null,
           );
         })
         .catch((e) => setError(e.message)),
-    [token],
+    [token, initialContentId, onInitialContentOpened],
   );
   useEffect(() => {
     reload();
@@ -992,11 +1331,48 @@ function ContentView({
   };
   const addElement = (type: string) => {
     if (!selected) return;
-    const prior = selected.draft_version?.design_document || selected.published_version?.design_document;
+    const prior =
+      selected.draft_version?.design_document ||
+      selected.published_version?.design_document;
     if (!prior) return;
-    const labels: Record<string, string> = { text: "Text", image: "Choose media", video: "Choose video", shape: "", clock: "Clock", date: "Date", weather: "Weather", website: "https://example.org", qr: "QR destination", ticker: "Scrolling message", pdf: "Choose PDF" };
-    const design = { ...prior, elements: [...prior.elements, { id: crypto.randomUUID(), type, text: labels[type], x: 180 + prior.elements.length * 30, y: 560, width: 600, height: 100, z_index: prior.elements.length + 1 }] };
-    request(`/content/${selected.id}/draft`, token, { method: "POST", body: JSON.stringify({ design_document: design }) }).then(() => { notify(`${type} added to the draft.`); reload(); }).catch((reason) => setError(reason.message));
+    const labels: Record<string, string> = {
+      text: "Text",
+      image: "Choose media",
+      video: "Choose video",
+      shape: "",
+      clock: "Clock",
+      date: "Date",
+      weather: "Weather",
+      website: "https://example.org",
+      qr: "QR destination",
+      ticker: "Scrolling message",
+      pdf: "Choose PDF",
+    };
+    const design = {
+      ...prior,
+      elements: [
+        ...prior.elements,
+        {
+          id: crypto.randomUUID(),
+          type,
+          text: labels[type],
+          x: 180 + prior.elements.length * 30,
+          y: 560,
+          width: 600,
+          height: 100,
+          z_index: prior.elements.length + 1,
+        },
+      ],
+    };
+    request(`/content/${selected.id}/draft`, token, {
+      method: "POST",
+      body: JSON.stringify({ design_document: design }),
+    })
+      .then(() => {
+        notify(`${type} added to the draft.`);
+        reload();
+      })
+      .catch((reason) => setError(reason.message));
   };
   const publish = async () => {
     if (!selected) return;
@@ -1013,15 +1389,63 @@ function ContentView({
   const persistDesign = async (design: DesignerDocument) => {
     if (!selected) return;
     try {
-      await request(`/content/${selected.id}/draft`, token, { method: "POST", body: JSON.stringify({ design_document: design }) });
-      setSelected(current => current ? { ...current, draft_version: { revision: current.draft_version?.revision || (current.published_version?.revision || 0) + 1, design_document: design } } : current);
-      setItems(current => current.map(item => item.id === selected.id ? { ...item, draft_version: { revision: item.draft_version?.revision || (item.published_version?.revision || 0) + 1, design_document: design } } : item));
-    } catch (reason) { setError(reason instanceof Error ? `Draft save failed: ${reason.message}` : "Draft save failed. Your changes remain in this browser."); }
+      await request(`/content/${selected.id}/draft`, token, {
+        method: "POST",
+        body: JSON.stringify({ design_document: design }),
+      });
+      setSelected((current) =>
+        current
+          ? {
+              ...current,
+              draft_version: {
+                revision:
+                  current.draft_version?.revision ||
+                  (current.published_version?.revision || 0) + 1,
+                design_document: design,
+              },
+            }
+          : current,
+      );
+      setItems((current) =>
+        current.map((item) =>
+          item.id === selected.id
+            ? {
+                ...item,
+                draft_version: {
+                  revision:
+                    item.draft_version?.revision ||
+                    (item.published_version?.revision || 0) + 1,
+                  design_document: design,
+                },
+              }
+            : item,
+        ),
+      );
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? `Draft save failed: ${reason.message}`
+          : "Draft save failed. Your changes remain in this browser.",
+      );
+    }
   };
   const document =
     selected?.draft_version?.design_document ||
     selected?.published_version?.design_document;
-  if (editing && selected && document) return <DesignerScreen content={selected} document={document as DesignerDocument} token={token} notify={notify} onBack={() => { setEditing(false); reload(); }} onChanged={persistDesign} />;
+  if (editing && selected && document)
+    return (
+      <DesignerScreen
+        content={selected}
+        document={document as DesignerDocument}
+        token={token}
+        notify={notify}
+        onBack={() => {
+          setEditing(false);
+          reload();
+        }}
+        onChanged={persistDesign}
+      />
+    );
   return (
     <>
       <div className="page-title">
@@ -1077,7 +1501,16 @@ function ContentView({
         </div>
         {selected && document ? (
           <div className="designer">
-            <SignalDesigner document={document as DesignerDocument} onChange={persistDesign} onPreview={() => notify("Preview shows the 16:9 design state. Player context is available from each Player's Preview action.")} onPublish={publish} />
+            <SignalDesigner
+              document={document as DesignerDocument}
+              onChange={persistDesign}
+              onPreview={() =>
+                notify(
+                  "Preview shows the 16:9 design state. Player context is available from each Player's Preview action.",
+                )
+              }
+              onPublish={publish}
+            />
             <AssignmentPanel
               content={selected}
               token={token}
@@ -1097,27 +1530,308 @@ function ContentView({
   );
 }
 
-function DesignerScreen({ content, document, token, notify, onBack, onChanged }: { content: ContentItem; document: DesignerDocument; token: string; notify: (message: string) => void; onBack: () => void; onChanged: (document: DesignerDocument) => void }) {
+function DesignerScreen({
+  content,
+  document,
+  token,
+  notify,
+  onBack,
+  onChanged,
+}: {
+  content: ContentItem;
+  document: DesignerDocument;
+  token: string;
+  notify: (message: string) => void;
+  onBack: () => void;
+  onChanged: (document: DesignerDocument) => void;
+}) {
   const [saving, setSaving] = useState("Saved ✓");
   const [publishOpen, setPublishOpen] = useState(false);
-  const [published, setPublished] = useState(Boolean(content.published_version));
-  const save = (next: DesignerDocument) => { setSaving("Saving…"); onChanged(next); window.setTimeout(() => setSaving("Saved ✓"), 400); };
-  const publish = async () => { try { await request(`/content/${content.id}/publish`, token, { method: "POST" }); setPublished(true); notify("Content published. Select one or more destinations below."); } catch (reason) { notify(reason instanceof Error ? reason.message : "Unable to publish content."); } };
-  return <main className="designer-page"><header className="designer-header"><button className="back" onClick={onBack}>← Content</button><div className="designer-name"><b>{content.name}</b><small>{saving}</small></div><div className="designer-header-actions"><button className="secondary-button" onClick={() => notify("Preview uses the same 16:9 document as the canvas. This is a server-side design preview, not a player screenshot.")}>Preview</button><button className="primary" onClick={() => setPublishOpen(true)}>Publish</button></div></header><SignalDesigner document={document} onChange={save} onPreview={() => notify("Preview uses the same 16:9 document as the canvas.")} onPublish={() => setPublishOpen(true)} />{publishOpen && <div className="modal-backdrop"><section className="publish-drawer"><header><div><p className="eyebrow">PUBLISH</p><h2>Publish “{content.name}”</h2></div><button className="close" onClick={() => setPublishOpen(false)}>×</button></header>{!published && <section className="publish-step"><p>Your published revision remains unchanged until you confirm.</p><button className="primary" onClick={publish}>Publish revision</button></section>}<AssignmentPanel content={content} token={token} published={published} notify={notify} /><footer><button className="secondary-button" onClick={() => setPublishOpen(false)}>Done</button></footer></section></div>}</main>;
+  const [published, setPublished] = useState(
+    Boolean(content.published_version),
+  );
+  const save = (next: DesignerDocument) => {
+    setSaving("Saving…");
+    onChanged(next);
+    window.setTimeout(() => setSaving("Saved ✓"), 400);
+  };
+  const publish = async () => {
+    try {
+      await request(`/content/${content.id}/publish`, token, {
+        method: "POST",
+      });
+      setPublished(true);
+      notify("Content published. Select one or more destinations below.");
+    } catch (reason) {
+      notify(
+        reason instanceof Error ? reason.message : "Unable to publish content.",
+      );
+    }
+  };
+  return (
+    <main className="designer-page">
+      <header className="designer-header">
+        <button className="back" onClick={onBack}>
+          ← Content
+        </button>
+        <div className="designer-name">
+          <b>{content.name}</b>
+          <small>{saving}</small>
+        </div>
+        <div className="designer-header-actions">
+          <button
+            className="secondary-button"
+            onClick={() =>
+              notify(
+                "Preview uses the same 16:9 document as the canvas. This is a server-side design preview, not a player screenshot.",
+              )
+            }
+          >
+            Preview
+          </button>
+          <button className="primary" onClick={() => setPublishOpen(true)}>
+            Publish
+          </button>
+        </div>
+      </header>
+      <SignalDesigner
+        document={document}
+        onChange={save}
+        onPreview={() =>
+          notify("Preview uses the same 16:9 document as the canvas.")
+        }
+        onPublish={() => setPublishOpen(true)}
+      />
+      {publishOpen && (
+        <div className="modal-backdrop">
+          <section className="publish-drawer">
+            <header>
+              <div>
+                <p className="eyebrow">PUBLISH</p>
+                <h2>Publish “{content.name}”</h2>
+              </div>
+              <button className="close" onClick={() => setPublishOpen(false)}>
+                ×
+              </button>
+            </header>
+            {!published && (
+              <section className="publish-step">
+                <p>
+                  Your published revision remains unchanged until you confirm.
+                </p>
+                <button className="primary" onClick={publish}>
+                  Publish revision
+                </button>
+              </section>
+            )}
+            <AssignmentPanel
+              content={content}
+              token={token}
+              published={published}
+              notify={notify}
+            />
+            <footer>
+              <button
+                className="secondary-button"
+                onClick={() => setPublishOpen(false)}
+              >
+                Done
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+    </main>
+  );
 }
 
-function AssignmentPanel({ content, token, published, notify }: { content: ContentItem; token: string; published: boolean; notify: (message: string) => void }) {
+function AssignmentPanel({
+  content,
+  token,
+  published,
+  notify,
+}: {
+  content: ContentItem;
+  token: string;
+  published: boolean;
+  notify: (message: string) => void;
+}) {
   const [players, setPlayers] = useState<Player[]>([]);
   const [zones, setZones] = useState<(Zone & { layout_name: string })[]>([]);
-  const [assignments, setAssignments] = useState<{ id: string; destination_type: string; destination_id: string; priority: number; duration_seconds?: number; transition?: string; starts_at?: string; ends_at?: string }[]>([]);
+  const [assignments, setAssignments] = useState<
+    {
+      id: string;
+      destination_type: string;
+      destination_id: string;
+      priority: number;
+      duration_seconds?: number;
+      transition?: string;
+      starts_at?: string;
+      ends_at?: string;
+    }[]
+  >([]);
   const [destination, setDestination] = useState("");
   const [error, setError] = useState("");
-  const load = useCallback(() => Promise.all([request("/destinations", token), request(`/content/${content.id}/assignments`, token)]).then(([destinations, nextAssignments]) => { setPlayers(destinations.players); setZones(destinations.zones); setAssignments(nextAssignments); }).catch((reason) => setError(reason.message)), [content.id, token]);
-  useEffect(() => { load(); }, [load]);
-  const destinations = [{ id: "", label: "Choose a player or zone", type: "" }, ...players.map(player => ({ id: `player:${player.id}`, label: `${player.building_name} → ${player.name}`, type: "player" })), ...zones.map(zone => ({ id: `zone:${zone.id}`, label: `${zone.layout_name} → ${zone.name}`, type: "zone" }))];
-  const assign = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!published) { setError("Publish this content before assigning it to a display."); return; } const form = new FormData(event.currentTarget); const [destinationType, destinationId] = destination.split(":"); if (!destinationType || !destinationId) { setError("Choose a destination."); return; } const endsAt = String(form.get("ends_at") || ""); if (!endsAt && !window.confirm("This content has no expiration date and will remain active until you remove it. Continue?")) return; try { await request(`/content/${content.id}/assignments`, token, { method: "POST", body: JSON.stringify({ destination_type: destinationType, destination_id: destinationId, priority: Number(form.get("priority")), duration_seconds: form.get("duration_seconds") ? Number(form.get("duration_seconds")) : null, transition: form.get("transition"), starts_at: form.get("starts_at") || null, ends_at: endsAt || null }) }); notify("Content assigned. Signal will use its schedule when creating player state."); setDestination(""); event.currentTarget.reset(); load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to assign content."); } };
-  const remove = async (id: string) => { if (!window.confirm("Remove this destination assignment? The content itself will not be deleted.")) return; try { await request(`/assignments/${id}`, token, { method: "DELETE" }); notify("Assignment removed."); load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to remove assignment."); } };
-  return <section className="assignment-panel"><h3>Publish destinations</h3><p>Choose where this published content should appear. Schedule and rotation settings remain independent for each destination.</p><form onSubmit={assign} className="inline-form"><select value={destination} onChange={event => setDestination(event.target.value)} required>{destinations.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select><select name="priority" defaultValue="1"><option value="1">Normal priority</option><option value="2">Elevated priority</option><option value="3">High priority</option></select><input name="duration_seconds" type="number" min="1" placeholder="Duration (20 sec)" /><select name="transition" defaultValue="fade"><option value="none">No transition</option><option value="fade">Fade</option><option value="slide">Slide</option></select><input name="starts_at" type="datetime-local" aria-label="Start time" /><input name="ends_at" type="datetime-local" aria-label="Expiration time" /><button className="secondary-button" disabled={!published}>Assign</button></form>{error && <p className="form-error">{error}</p>}{assignments.length > 0 && <div className="grant-list">{assignments.map(item => <span className="grant-chip" key={item.id}>{item.destination_type} · {item.transition || "default"} · priority {item.priority}<button onClick={() => remove(item.id)} aria-label="Remove assignment">×</button></span>)}</div>}</section>;
+  const load = useCallback(
+    () =>
+      Promise.all([
+        request("/destinations", token),
+        request(`/content/${content.id}/assignments`, token),
+      ])
+        .then(([destinations, nextAssignments]) => {
+          setPlayers(destinations.players);
+          setZones(destinations.zones);
+          setAssignments(nextAssignments);
+        })
+        .catch((reason) => setError(reason.message)),
+    [content.id, token],
+  );
+  useEffect(() => {
+    load();
+  }, [load]);
+  const destinations = [
+    { id: "", label: "Choose a player or zone", type: "" },
+    ...players.map((player) => ({
+      id: `player:${player.id}`,
+      label: `${player.building_name} → ${player.name}`,
+      type: "player",
+    })),
+    ...zones.map((zone) => ({
+      id: `zone:${zone.id}`,
+      label: `${zone.layout_name} → ${zone.name}`,
+      type: "zone",
+    })),
+  ];
+  const assign = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!published) {
+      setError("Publish this content before assigning it to a display.");
+      return;
+    }
+    const form = new FormData(event.currentTarget);
+    const [destinationType, destinationId] = destination.split(":");
+    if (!destinationType || !destinationId) {
+      setError("Choose a destination.");
+      return;
+    }
+    const endsAt = String(form.get("ends_at") || "");
+    if (
+      !endsAt &&
+      !window.confirm(
+        "This content has no expiration date and will remain active until you remove it. Continue?",
+      )
+    )
+      return;
+    try {
+      await request(`/content/${content.id}/assignments`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          destination_type: destinationType,
+          destination_id: destinationId,
+          priority: Number(form.get("priority")),
+          duration_seconds: form.get("duration_seconds")
+            ? Number(form.get("duration_seconds"))
+            : null,
+          transition: form.get("transition"),
+          starts_at: form.get("starts_at") || null,
+          ends_at: endsAt || null,
+        }),
+      });
+      notify(
+        "Content assigned. Signal will use its schedule when creating player state.",
+      );
+      setDestination("");
+      event.currentTarget.reset();
+      load();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to assign content.",
+      );
+    }
+  };
+  const remove = async (id: string) => {
+    if (
+      !window.confirm(
+        "Remove this destination assignment? The content itself will not be deleted.",
+      )
+    )
+      return;
+    try {
+      await request(`/assignments/${id}`, token, { method: "DELETE" });
+      notify("Assignment removed.");
+      load();
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to remove assignment.",
+      );
+    }
+  };
+  return (
+    <section className="assignment-panel">
+      <h3>Publish destinations</h3>
+      <p>
+        Choose where this published content should appear. Schedule and rotation
+        settings remain independent for each destination.
+      </p>
+      <form onSubmit={assign} className="inline-form">
+        <select
+          value={destination}
+          onChange={(event) => setDestination(event.target.value)}
+          required
+        >
+          {destinations.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+        <select name="priority" defaultValue="1">
+          <option value="1">Normal priority</option>
+          <option value="2">Elevated priority</option>
+          <option value="3">High priority</option>
+        </select>
+        <input
+          name="duration_seconds"
+          type="number"
+          min="1"
+          placeholder="Duration (20 sec)"
+        />
+        <select name="transition" defaultValue="fade">
+          <option value="none">No transition</option>
+          <option value="fade">Fade</option>
+          <option value="slide">Slide</option>
+        </select>
+        <input name="starts_at" type="datetime-local" aria-label="Start time" />
+        <input
+          name="ends_at"
+          type="datetime-local"
+          aria-label="Expiration time"
+        />
+        <button className="secondary-button" disabled={!published}>
+          Assign
+        </button>
+      </form>
+      {error && <p className="form-error">{error}</p>}
+      {assignments.length > 0 && (
+        <div className="grant-list">
+          {assignments.map((item) => (
+            <span className="grant-chip" key={item.id}>
+              {item.destination_type} · {item.transition || "default"} ·
+              priority {item.priority}
+              <button
+                onClick={() => remove(item.id)}
+                aria-label="Remove assignment"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function UsersView({

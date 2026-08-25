@@ -14,6 +14,7 @@ from app.models import AuditEvent, Building, PermissionGrant, Player, User
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch):
+    auth._attempts.clear()
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     session_factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     Base.metadata.create_all(engine)

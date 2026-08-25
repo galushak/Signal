@@ -1,4 +1,5 @@
 import secrets
+from html import escape
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated
@@ -773,6 +774,61 @@ def list_content(include_trashed: bool = False, user: User = Depends(auth.get_cu
     query = select(Content).order_by(Content.updated_at.desc())
     if not include_trashed: query = query.where(Content.trashed_at.is_(None))
     return [content_data(item, db) for item in db.scalars(query) if allowed(user, "view", item.scope_type, item.scope_id, db)]
+
+
+def design_thumbnail_svg(document: dict) -> str:
+    """A safe, lightweight thumbnail for the structured design — never a new
+    flattened Content object. The canonical editable JSON remains unchanged.
+    """
+    canvas = document.get("canvas") or {}
+    background = escape(str(canvas.get("background") or "#172d43"), quote=True)
+    elements = document.get("elements") or []
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080"><rect width="1920" height="1080" fill="{background}"/>']
+    for element in elements[:24]:
+        x, y = int(element.get("x", 0)), int(element.get("y", 0))
+        width, height = int(element.get("width", 200)), int(element.get("height", 80))
+        style = element.get("style") or {}
+        if element.get("type") in {"shape", "image", "video", "pdf", "website"}:
+            parts.append(f'<rect x="{x}" y="{y}" width="{width}" height="{height}" rx="{int(style.get("cornerRadius", 0))}" fill="{escape(str(style.get("fill", "#54657a")), quote=True)}"/>')
+        text = escape(str(element.get("text") or ""))[:140]
+        if text:
+            fill = escape(str(style.get("fill", "#ffffff")), quote=True)
+            size = min(160, max(12, int(style.get("fontSize", 44))))
+            anchor = {"center": "middle", "right": "end"}.get(style.get("textAlign"), "start")
+            tx = x + (width / 2 if anchor == "middle" else width if anchor == "end" else 0)
+            parts.append(f'<text x="{tx}" y="{y + min(height, size)}" fill="{fill}" font-family="Arial, sans-serif" font-size="{size}" text-anchor="{anchor}">{text}</text>')
+    return "".join(parts) + "</svg>"
+
+
+@router.get("/content/{content_id}/thumbnail.svg")
+def content_thumbnail(content_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = content_for_user(content_id, "view", user, db)
+    versions = db.scalars(select(ContentVersion).where(ContentVersion.content_id == item.id).order_by(ContentVersion.revision.desc())).all()
+    version = next((candidate for candidate in versions if candidate.state in {"draft", "published"}), None)
+    if not version:
+        raise HTTPException(status_code=404, detail="A design thumbnail is not available.")
+    return Response(content=design_thumbnail_svg(version.design_document), media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/library")
+def unified_library(kind: str = "all", search: str | None = None, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    if kind not in {"all", "design", "image", "video", "pdf"}:
+        raise HTTPException(status_code=422, detail="Choose All, Designs, Images, Videos, or PDFs.")
+    needle = (search or "").strip().lower()
+    items = []
+    if kind in {"all", "design"}:
+        for content in db.scalars(select(Content).where(Content.trashed_at.is_(None)).order_by(Content.updated_at.desc())):
+            if not allowed(user, "view", content.scope_type, content.scope_id, db) or needle and needle not in content.name.lower():
+                continue
+            data = content_data(content, db)
+            items.append({"id": content.id, "kind": "design", "name": content.name, "status": "Published" if data["published_version"] else "Draft", "updated_at": content.updated_at, "thumbnail_url": f"/api/v1/content/{content.id}/thumbnail.svg", "scope_type": content.scope_type, "scope_id": content.scope_id})
+    if kind in {"all", "image", "video", "pdf"}:
+        for asset in db.scalars(select(MediaAsset).where(MediaAsset.trashed_at.is_(None)).order_by(MediaAsset.created_at.desc())):
+            tags = db.scalars(select(Tag.name).join(MediaAssetTag, Tag.id == MediaAssetTag.tag_id).where(MediaAssetTag.asset_id == asset.id)).all()
+            if not allowed(user, "view", asset.scope_type, asset.scope_id, db) or kind != "all" and asset.media_type != kind or needle and needle not in asset.display_name.lower() and needle not in tags:
+                continue
+            items.append({"id": asset.id, "kind": asset.media_type, "name": asset.display_name, "status": asset.processing_state, "updated_at": asset.updated_at, "thumbnail_url": f"/api/v1/media/{asset.id}/thumbnail" if asset.thumbnail_path else None, "scope_type": asset.scope_type, "scope_id": asset.scope_id, "tags": tags})
+    return sorted(items, key=lambda item: item["updated_at"] or datetime.min.replace(tzinfo=UTC), reverse=True)
 
 
 @router.post("/content", status_code=201)
