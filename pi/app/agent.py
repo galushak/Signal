@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -78,17 +79,63 @@ class PlayerAgent:
     def enroll(self) -> None:
         if self.enrolled:
             return
+        expires_at = self.identity.get("enrollment_expires_at")
+        if expires_at:
+            try:
+                expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if expires <= datetime.now(UTC) + timedelta(seconds=10):
+                    self.identity["enrollment_code"] = self.enrollment_code()
+                    self.identity.pop("enrollment_expires_at", None)
+                    atomic_write(self.identity_path, json.dumps(self.identity).encode())
+                    self.runtime["enrollment_status"] = "getting a new enrollment code"
+                    self._save_runtime()
+            except ValueError:
+                self.identity.pop("enrollment_expires_at", None)
         code = self.identity["enrollment_code"]
         response = self.client.post(f"{self.api_url}/player-agent/enrollment/start", json={"code": code, "device_identifier": self.identity["device_identifier"]})
+        # An upgraded player may have a code without persisted expiry metadata.
+        # Never revive that stale value: replace it after the authoritative 410.
+        if response.status_code == 410:
+            code = self.enrollment_code()
+            self.identity["enrollment_code"] = code
+            response = self.client.post(f"{self.api_url}/player-agent/enrollment/start", json={"code": code, "device_identifier": self.identity["device_identifier"]})
         response.raise_for_status()
+        self.identity["enrollment_expires_at"] = response.json()["expires_at"]
+        atomic_write(self.identity_path, json.dumps(self.identity).encode())
         status = self.client.get(f"{self.api_url}/player-agent/enrollment/{code}")
         status.raise_for_status()
         payload = status.json()
         if payload.get("status") == "enrolled":
             self.identity.update({"player_id": payload["player_id"], "device_secret": payload["device_secret"]})
             self.identity.pop("enrollment_code", None)
+            self.identity.pop("enrollment_expires_at", None)
             atomic_write(self.identity_path, json.dumps(self.identity).encode())
+            self.runtime["enrollment_status"] = "enrolled"
+            self._save_runtime()
             LOG.info("Player enrollment completed")
+        elif payload.get("status") == "pending":
+            self.runtime["enrollment_status"] = "ready"
+            self._save_runtime()
+
+    def renew_enrollment(self) -> dict:
+        """Replace an unclaimed code on request. The server supersedes the old
+        pending record for this device only after it accepts the new one.
+        """
+        if self.enrolled:
+            return {"status": "enrolled"}
+        previous = self.identity.get("enrollment_code")
+        candidate = self.enrollment_code()
+        self.runtime["enrollment_status"] = "getting a new enrollment code"
+        self._save_runtime()
+        response = self.client.post(f"{self.api_url}/player-agent/enrollment/start", json={"code": candidate, "device_identifier": self.identity["device_identifier"]})
+        response.raise_for_status()
+        self.identity["enrollment_code"] = candidate
+        self.identity["enrollment_expires_at"] = response.json()["expires_at"]
+        atomic_write(self.identity_path, json.dumps(self.identity).encode())
+        self.runtime["enrollment_status"] = "ready"
+        self._save_runtime()
+        LOG.info("Renewed unclaimed enrollment code")
+        return {"status": "ready", "code_changed": candidate != previous, "expires_at": self.identity["enrollment_expires_at"]}
 
     def _download_media(self, manifest: dict) -> None:
         self.media_dir.mkdir(parents=True, exist_ok=True)
@@ -166,4 +213,7 @@ class PlayerAgent:
             self.heartbeat()
             self.commands()
         except Exception as exc:
+            if not self.enrolled:
+                self.runtime["enrollment_status"] = "Unable to contact Signal. Trying again automatically…"
+                self._save_runtime()
             LOG.warning("Server sync unavailable; continuing cached playback: %s", exc)

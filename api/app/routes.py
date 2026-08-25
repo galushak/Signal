@@ -392,11 +392,22 @@ def validate_player_enrollment(payload: EnrollmentValidationInput, user: User = 
 def start_agent_enrollment(payload: AgentEnrollmentInput, db: Session = Depends(get_db)):
     """Register the code displayed by an otherwise unauthenticated player."""
     now = datetime.now(UTC)
+    # Keep a recent expired record briefly so the management UI can explain the
+    # outcome, while preventing abandoned enrollment rows from accumulating.
+    for stale in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.claimed_at.is_(None), PlayerEnrollment.expires_at < now - timedelta(days=1))).all():
+        db.delete(stale)
     existing = db.scalar(select(PlayerEnrollment).where(PlayerEnrollment.device_identifier == payload.device_identifier))
-    if existing and not existing.claimed_at and auth.utc_datetime(existing.expires_at) > now and auth.verify_password(payload.code.upper(), existing.code_hash):
-        return {"status": "pending", "expires_at": existing.expires_at}
+    if existing and not existing.claimed_at and auth.verify_password(payload.code.upper(), existing.code_hash):
+        if auth.utc_datetime(existing.expires_at) > now:
+            return {"status": "pending", "expires_at": existing.expires_at}
+        db.delete(existing)
+        db.commit()
+        raise HTTPException(status_code=410, detail="Enrollment code has expired; request a replacement.")
     if existing and not existing.claimed_at:
         db.delete(existing)
+        # device_identifier is unique; flush the superseded pending record
+        # before inserting its replacement in this same transaction.
+        db.flush()
     enrollment = PlayerEnrollment(code_hash=auth.hash_password(payload.code.upper()), device_identifier=payload.device_identifier, expires_at=now + timedelta(minutes=15))
     db.add(enrollment); db.commit()
     return {"status": "pending", "expires_at": enrollment.expires_at}
