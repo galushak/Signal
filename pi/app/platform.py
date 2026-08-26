@@ -24,6 +24,9 @@ class PlayerPlatform:
     def temperature(self) -> str | float:
         return "unsupported"
 
+    def renderer_status(self) -> str:
+        return "local_web_only"
+
     def restart_renderer(self) -> tuple[str, dict]:
         return "unsupported", {"reason": "renderer restart is not available on this platform"}
 
@@ -59,6 +62,16 @@ class RaspberryPiPlatform(PlayerPlatform):
                 return int(stream.read().strip()) / 1000
         except (OSError, ValueError):
             return "unsupported"
+
+    def network_state(self) -> dict:
+        return {"online": "unknown", "kind": "raspberry-pi"}
+
+    def renderer_status(self) -> str:
+        try:
+            result = subprocess.run(["pgrep", "-u", "signal-player", "-f", "chromium"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            return "running" if result.returncode == 0 else "not_running"
+        except OSError:
+            return "unknown"
 
 
 def platform_for_environment() -> PlayerPlatform:

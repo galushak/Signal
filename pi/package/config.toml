@@ -1,0 +1,3 @@
+# Set this before enrollment, for example:
+#   sudo signal-player config set-server https://signal.example.org
+server_url = "https://signal.example.invalid"

@@ -1,0 +1,26 @@
+#!/bin/sh
+# Started by the graphical signal-player session. The loop is the renderer
+# watchdog: Chromium is restarted after a crash without restarting the agent.
+set -eu
+
+export HOME=/var/lib/signal-player
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_CACHE_HOME="$HOME/.cache"
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+
+while true; do
+  chromium \
+    --kiosk \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-features=Translate \
+    --autoplay-policy=no-user-gesture-required \
+    --mute-audio \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-pinch \
+    --overscroll-history-navigation=0 \
+    http://127.0.0.1:8090/player || true
+  sleep 3
+done

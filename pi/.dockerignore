@@ -1,0 +1,9 @@
+# The production package contains only the shared runtime and package assets.
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+tests/
+requirements-dev.txt
+.env*
+.git
+*.pem

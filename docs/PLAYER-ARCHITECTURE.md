@@ -22,3 +22,13 @@ validate before an atomic active-manifest swap. The local renderer evaluates
 schedule dates, weekday windows, and IANA timezone locally, so cached playback
 continues when the server is unavailable. Docker reports temperature as
 `unsupported`. Screenshot is intentionally unsupported rather than faked.
+
+For Raspberry Pi OS 64-bit Desktop (Bookworm), the production package runs the
+same player core in a `signal-player.service` system service bound only to
+localhost. A LightDM autologin session for the dedicated `signal-player` user
+starts Chromium through an XDG autostart entry, avoiding a fragile assumption
+that a system service owns the active X11/Wayland display. The agent uses
+systemd restart/backoff; the session launcher loops Chromium after a crash.
+Application and package-local Python dependencies are immutable under
+`/opt/signal-player`, while configuration and durable identity/cache remain in
+`/etc/signal-player` and `/var/lib/signal-player` through upgrades.

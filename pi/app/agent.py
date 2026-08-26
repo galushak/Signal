@@ -15,9 +15,9 @@ from urllib.parse import urlparse
 import httpx
 
 from .platform import PlayerPlatform, platform_for_environment
+from .version import PLAYER_VERSION
 
 LOG = logging.getLogger("signal.player")
-PLAYER_VERSION = "0.1.0"
 
 
 def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:

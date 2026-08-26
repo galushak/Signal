@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Signal Player Kiosk
+Comment=Launch the local Signal signage renderer
+Exec=/opt/signal-player/bin/signal-player-kiosk
+Terminal=false
+X-GNOME-Autostart-enabled=true
