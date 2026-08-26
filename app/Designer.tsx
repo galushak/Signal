@@ -628,6 +628,11 @@ export function SignalDesigner({
       </aside>
       <section className="designer-workspace">
         <div className="designer-toolbar">
+          <button onClick={() => add("body")} title="Insert a text box" aria-label="Text Box">Text Box</button>
+          <button onClick={() => add("image")} title="Insert an image placeholder" aria-label="Image">Image</button>
+          <button onClick={() => add("shape")} title="Insert a rectangle" aria-label="Shape">Shape</button>
+          <label className="designer-background" title="Canvas background">Background<input type="color" value={document.canvas.background || "#172d43"} onChange={(event) => commit({ ...document, canvas: { ...document.canvas, background: event.target.value } })} /></label>
+          <span className="toolbar-divider" />
           <button
             onClick={() => setZoom((value) => clamp(value - 0.08, 0.2, 1))}
           >
@@ -652,7 +657,16 @@ export function SignalDesigner({
           <button onClick={paste} disabled={!clipboard.current.length}>
             Paste
           </button>
+          <button onClick={duplicate} disabled={!selected.length} title="Duplicate selected object">Duplicate</button>
+          <button onClick={remove} disabled={!selected.length} title="Delete selected object">Delete</button>
           <span className="toolbar-divider" />
+          {supportsTextStyle && <>
+            <button onClick={() => applyStyle({ fontStyle: active.style?.fontStyle === "bold" ? "normal" : "bold" })} aria-label="Bold">B</button>
+            <button onClick={() => applyStyle({ fontStyle: active.style?.fontStyle === "italic" ? "normal" : "italic" })} aria-label="Italic">I</button>
+            <button onClick={() => applyStyle({ textDecoration: active.style?.textDecoration === "underline" ? "" : "underline" })} aria-label="Underline">U</button>
+            {(["left", "center", "right"] as const).map((value) => <button key={value} onClick={() => applyStyle({ textAlign: value })} aria-label={`Text align ${value}`}>{value === "left" ? "≡" : value === "center" ? "≡" : "≡"}</button>)}
+            <span className="toolbar-divider" />
+          </>}
           <button
             onClick={() => align("left")}
             disabled={!selected.length}
@@ -709,6 +723,8 @@ export function SignalDesigner({
           >
             Space Y
           </button>
+          <button onClick={() => layer("front")} disabled={selected.length !== 1} title="Bring to front">Front</button>
+          <button onClick={() => layer("back")} disabled={selected.length !== 1} title="Send to back">Back</button>
           <span className="toolbar-divider" />
           <button onClick={() => setShowSafe((value) => !value)}>
             {showSafe ? "Hide" : "Show"} safe area
@@ -717,7 +733,7 @@ export function SignalDesigner({
             Preview
           </button>
           <button className="primary" onClick={onPublish}>
-            Publish
+            Save Version
           </button>
         </div>
         <div className="stage-scroll">

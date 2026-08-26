@@ -2123,13 +2123,11 @@ function ContentView({
         <div>
           <p className="eyebrow">AUTHORING</p>
           <h1>Content</h1>
-          <p>
-            Draft changes stay separate from active signage until you publish.
-          </p>
+          <p>Create and save designs here. Send saved versions to displays from Library.</p>
         </div>
       </div>
       <section className="panel create-panel">
-        <h2>Create content</h2>
+        <h2>Create design</h2>
         <form onSubmit={create} className="inline-form">
           <input name="name" placeholder="e.g. Welcome back" required />
           <select name="template" defaultValue="announcement">
@@ -2138,7 +2136,7 @@ function ContentView({
             <option value="event">Event</option>
             <option value="menu">Cafeteria Menu</option>
           </select>
-          <button className="secondary-button">Create content</button>
+          <button className="secondary-button">Create design</button>
         </form>
       </section>
       {error && <ErrorState message={error} />}
@@ -2171,31 +2169,8 @@ function ContentView({
           ))}
         </div>
         {selected && document ? (
-          <div className="designer">
-            <SignalDesigner
-              document={document as DesignerDocument}
-              onChange={persistDesign}
-              onPreview={() =>
-                notify(
-                  "Preview shows the 16:9 design state. Player context is available from each Player's Preview action.",
-                )
-              }
-              onPublish={publish}
-            />
-            <AssignmentPanel
-              content={selected}
-              token={token}
-              published={Boolean(selected.published_version)}
-              notify={notify}
-            />
-            <small>
-              Preview is a 1920 × 1080 server design document. Publishing does
-              not change a display until you choose a destination below.
-            </small>
-          </div>
-        ) : (
-          <Empty text="Create content to start designing." />
-        )}
+          <div className="content-summary"><b>{selected.name}</b><p>{selected.draft_version ? "Draft saved. Save Version when this design is ready for live displays." : "No working draft."}</p><button className="primary" onClick={() => setEditing(true)}>Edit design</button></div>
+        ) : <Empty text="Create a design to start designing." />}
       </section>
     </>
   );
@@ -2217,11 +2192,6 @@ function DesignerScreen({
   onChanged: (document: DesignerDocument) => void;
 }) {
   const [saving, setSaving] = useState("Saved ✓");
-  const [publishOpen, setPublishOpen] = useState(false);
-  const [sendOpen, setSendOpen] = useState(false);
-  const [published, setPublished] = useState(
-    Boolean(content.published_version),
-  );
   const save = (next: DesignerDocument) => {
     setSaving("Saving…");
     onChanged(next);
@@ -2232,8 +2202,7 @@ function DesignerScreen({
       await request(`/content/${content.id}/publish`, token, {
         method: "POST",
       });
-      setPublished(true);
-      notify("Content published. Select one or more destinations below.");
+      notify("Saved as the current display version. Distribution remains in Library.");
     } catch (reason) {
       notify(
         reason instanceof Error ? reason.message : "Unable to publish content.",
@@ -2244,7 +2213,7 @@ function DesignerScreen({
     <main className="designer-page">
       <header className="designer-header">
         <button className="back" onClick={onBack}>
-          ← Content
+          ← Library
         </button>
         <div className="designer-name">
           <b>{content.name}</b>
@@ -2261,12 +2230,8 @@ function DesignerScreen({
           >
             Preview
           </button>
-          <button className="primary" onClick={() => setPublishOpen(true)}>
-            Publish
-          </button>
-          <button className="secondary-button" onClick={() => setSendOpen(true)}>
-            Send to Display
-          </button>
+          <button className="primary" onClick={publish}>Save Version</button>
+          <button className="secondary-button" onClick={onBack}>Done</button>
         </div>
       </header>
       <SignalDesigner
@@ -2275,58 +2240,8 @@ function DesignerScreen({
         onPreview={() =>
           notify("Preview uses the same 16:9 document as the canvas.")
         }
-        onPublish={() => setPublishOpen(true)}
+        onPublish={publish}
       />
-      {publishOpen && (
-        <div className="modal-backdrop">
-          <section className="publish-drawer">
-            <header>
-              <div>
-                <p className="eyebrow">PUBLISH</p>
-                <h2>Publish “{content.name}”</h2>
-              </div>
-              <button className="close" onClick={() => setPublishOpen(false)}>
-                ×
-              </button>
-            </header>
-            {!published && (
-              <section className="publish-step">
-                <p>
-                  Your published revision remains unchanged until you confirm.
-                </p>
-                <button className="primary" onClick={publish}>
-                  Publish revision
-                </button>
-              </section>
-            )}
-            <AssignmentPanel
-              content={content}
-              token={token}
-              published={published}
-              notify={notify}
-            />
-            <footer>
-              <button
-                className="secondary-button"
-                onClick={() => setPublishOpen(false)}
-              >
-                Done
-              </button>
-            </footer>
-          </section>
-        </div>
-      )}
-      {sendOpen && (
-        <SendToDisplayDialog
-          item={{ id: content.id, kind: "design", name: content.name, status: published ? "Published" : "Draft", updated_at: "" }}
-          token={token}
-          onClose={() => setSendOpen(false)}
-          onSent={(display) => {
-            notify(`“${content.name}” was sent to ${display}.`);
-            setSendOpen(false);
-          }}
-        />
-      )}
     </main>
   );
 }

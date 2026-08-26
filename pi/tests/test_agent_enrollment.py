@@ -1,4 +1,5 @@
 from app.agent import PlayerAgent
+from app.main import PLAYER_HTML
 from app.platform import PlayerPlatform
 
 
@@ -44,3 +45,9 @@ def test_server_address_is_validated_and_persisted(tmp_path):
     restarted = PlayerAgent(state_dir=tmp_path / "state", platform=PlayerPlatform(), config_path=config_path)
     assert restarted.server_url == "https://signal.example.org"
     assert restarted.api_url == "https://signal.example.org/api/v1"
+
+
+def test_player_renderer_does_not_replace_the_dom_for_the_same_item():
+    """Polling may call draw repeatedly, but unchanged playback must be inert."""
+    assert "if(renderedKey===key)return" in PLAYER_HTML
+    assert "let renderedKey=''" in PLAYER_HTML
