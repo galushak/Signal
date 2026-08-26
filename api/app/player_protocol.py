@@ -17,6 +17,9 @@ from .models import Content, ContentAssignment, ContentVersion, Layout, MediaAss
 from .settings import get_settings
 
 MANIFEST_SCHEMA = 1
+FULL_SCREEN_SYSTEM_KEY = "full-screen"
+FULL_SCREEN_LAYOUT_ID = "00000000-0000-4000-8000-000000000001"
+MAIN_ZONE_ID = "00000000-0000-4000-8000-000000000002"
 
 
 def _asset_ids(value: Any) -> set[str]:
@@ -68,12 +71,20 @@ def build_manifest(player: Player, db: Session) -> dict:
     """
     settings = get_settings()
     layout = db.get(Layout, player.layout_id) if player.layout_id else None
+    if not layout or layout.trashed_at or not layout.enabled:
+        layout = db.scalar(select(Layout).where(Layout.system_key == FULL_SCREEN_SYSTEM_KEY))
     zones = [] if not layout else sorted((zone for zone in layout.zones if zone.enabled), key=lambda zone: (zone.z_index, zone.name))
     destinations = {player.id, *(zone.id for zone in zones)}
     content_items: list[dict] = []
     asset_ids: set[str] = set()
     assignments = db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))).all()
     for assignment in assignments:
+        assignment_payload = _assignment_data(assignment)
+        # Existing direct-display assignments remain valid on the Full Screen
+        # fallback, but the player receives them as the Main zone's rotation.
+        if layout and layout.system_key == FULL_SCREEN_SYSTEM_KEY and assignment.destination_type == "player" and assignment.destination_id == player.id:
+            assignment_payload["destinationType"] = "zone"
+            assignment_payload["destinationId"] = MAIN_ZONE_ID
         if assignment.source_type == "media" and assignment.media_asset_id:
             asset = db.get(MediaAsset, assignment.media_asset_id)
             if not asset or asset.trashed_at:
@@ -83,7 +94,7 @@ def build_manifest(player: Player, db: Session) -> dict:
                 "id": assignment.id,
                 "name": asset.display_name,
                 "source": {"type": asset.media_type, "assetId": asset.id, "fit": "contain"},
-                "assignment": _assignment_data(assignment),
+                "assignment": assignment_payload,
             })
             continue
         content = db.get(Content, assignment.content_id) if assignment.content_id else None
@@ -98,7 +109,7 @@ def build_manifest(player: Player, db: Session) -> dict:
             "revision": version.revision,
             "source": {"type": "design"},
             "design": document,
-            "assignment": _assignment_data(assignment),
+            "assignment": assignment_payload,
         })
     media = []
     for asset_id in sorted(asset_ids):

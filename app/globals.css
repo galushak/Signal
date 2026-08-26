@@ -1747,6 +1747,63 @@ small,
 .display-detail-header p {
   margin: 0 0 7px;
 }
+.detail-layout {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.layout-change-modal {
+  max-width: 520px;
+}
+.layout-change-body {
+  padding: 4px 24px 20px;
+}
+.layout-mini-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  margin: 13px 0;
+  overflow: hidden;
+  border: 1px solid #aeb8ca;
+  border-radius: 8px;
+  background: #eceff6;
+}
+.layout-mini-preview span {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #5b47a8;
+  background: #5b47a833;
+  color: #33256b;
+  font-size: 11px;
+  font-weight: 800;
+}
+.layout-warning {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: #fff5dd;
+  color: #775220;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.layout-detail-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.layout-detail-title h2 {
+  margin-bottom: 3px;
+}
+.layout-detail-title small,
+.layout-system-note {
+  color: #718098;
+  font-size: 12px;
+}
+.layout-system-note {
+  margin: 16px 0 0;
+}
 .player-content-panel {
   padding: 0;
   overflow: hidden;

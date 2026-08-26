@@ -21,6 +21,8 @@ from .worker import prepare_media
 
 router = APIRouter(prefix="/api/v1")
 settings = get_settings()
+FULL_SCREEN_SYSTEM_KEY = "full-screen"
+FULL_SCREEN_LAYOUT_ID = "00000000-0000-4000-8000-000000000001"
 CAPABILITIES = {"view", "create_content", "edit_content", "trash_content", "upload_media", "manage_media", "publish", "schedule", "expire", "restore_versions", "view_audit_log", "publish_banner", "publish_takeover", "manage_players", "restart_players", "update_players", "manage_users", "manage_permissions", "manage_layouts", "manage_templates", "manage_settings", "manage_backups"}
 
 
@@ -65,6 +67,10 @@ class PlayerInput(BaseModel):
     description: str | None = None
     enabled: bool = True
     resolution: str | None = None
+    layout_id: str | None = None
+
+
+class PlayerLayoutInput(BaseModel):
     layout_id: str | None = None
 
 
@@ -179,11 +185,15 @@ def building_data(building: Building) -> dict:
     return {"id": building.id, "name": building.name, "description": building.description, "enabled": building.enabled, "created_at": building.created_at, "updated_at": building.updated_at}
 
 
-def player_data(player: Player) -> dict:
+def player_data(player: Player, db: Session | None = None) -> dict:
     last_seen = auth.utc_datetime(player.last_seen_at) if player.last_seen_at else None
     state = "waiting_for_enrollment" if player.enrollment_status == "pending" else ("not_enrolled" if player.enrollment_status == "not_enrolled" else ("never_connected" if not last_seen else ("online" if datetime.now(UTC) - last_seen <= timedelta(seconds=75) else "offline")))
     runtime = player.runtime_data or {}
-    return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "archived_at": player.archived_at, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
+    data = {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "archived_at": player.archived_at, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
+    if db is not None:
+        layout = effective_layout(player, db)
+        data["effective_layout"] = {"id": layout.id, "name": layout.name, "system": bool(layout.system_key)}
+    return data
 
 
 def agent_player(request: Request, db: Session) -> Player:
@@ -270,7 +280,7 @@ def dashboard(user: User = Depends(auth.get_current_user), db: Session = Depends
         players_query = players_query.where(Player.id.in_(player_ids)) if player_ids else players_query.where(False)
     players = db.scalars(players_query).all()
     media_count = sum(1 for asset in db.scalars(select(MediaAsset).where(MediaAsset.trashed_at.is_(None))).all() if allowed(user, "view", asset.scope_type, asset.scope_id, db))
-    return {"players_total": len(players), "players_never_connected": sum(p.last_seen_at is None for p in players), "players_online": sum(p.health_state == "online" and p.last_seen_at is not None for p in players), "media_total": media_count, "warnings": [{"kind": "never_connected", "player": player_data(p)} for p in players if p.last_seen_at is None][:5]}
+    return {"players_total": len(players), "players_never_connected": sum(p.last_seen_at is None for p in players), "players_online": sum(p.health_state == "online" and p.last_seen_at is not None for p in players), "media_total": media_count, "warnings": [{"kind": "never_connected", "player": player_data(p, db)} for p in players if p.last_seen_at is None][:5]}
 
 
 @router.get("/buildings")
@@ -309,17 +319,17 @@ def update_building(building_id: str, payload: BuildingInput, request: Request, 
 def list_players(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     ids = visible_player_ids(user, db); query = select(Player).where(Player.archived_at.is_(None)).order_by(Player.name)
     if ids is not None: query = query.where(Player.id.in_(ids)) if ids else query.where(False)
-    return [{**player_data(item), "content_count": player_content_count(item, db)} for item in db.scalars(query)]
+    return [{**player_data(item, db), "content_count": player_content_count(item, db)} for item in db.scalars(query)]
 
 
 @router.post("/players", status_code=201)
 def create_player(payload: PlayerInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     scope_valid(BUILDING, payload.building_id, db); require(user, "manage_players", BUILDING, payload.building_id, db)
-    if payload.layout_id and not db.get(Layout, payload.layout_id): raise HTTPException(status_code=422, detail="Choose a valid layout.")
-    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, enabled=payload.enabled, resolution=payload.resolution, layout_id=payload.layout_id)
+    layout = assignable_layout(payload.layout_id, db)
+    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, enabled=payload.enabled, resolution=payload.resolution, layout_id=layout.id)
     db.add(player); db.flush()
     record(db, actor=user, action="player.created", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
-    db.commit(); db.refresh(player); return player_data(player)
+    db.commit(); db.refresh(player); return player_data(player, db)
 
 
 @router.patch("/players/{player_id}")
@@ -327,10 +337,31 @@ def update_player(player_id: str, payload: PlayerInput, request: Request, user: 
     player = db.get(Player, player_id)
     if not player or player.archived_at: raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "manage_players", PLAYER, player.id, db); scope_valid(BUILDING, payload.building_id, db)
-    if payload.layout_id and not db.get(Layout, payload.layout_id): raise HTTPException(status_code=422, detail="Choose a valid layout.")
-    player.name, player.building_id, player.description, player.enabled, player.resolution, player.layout_id = payload.name.strip(), payload.building_id, payload.description, payload.enabled, payload.resolution, payload.layout_id
-    record(db, actor=user, action="player.updated", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
-    db.commit(); db.refresh(player); return player_data(player)
+    layout = assignable_layout(payload.layout_id, db)
+    previous_layout = effective_layout(player, db)
+    player.name, player.building_id, player.description, player.enabled, player.resolution, player.layout_id = payload.name.strip(), payload.building_id, payload.description, payload.enabled, payload.resolution, layout.id
+    refresh_desired_state(PLAYER, player.id, db)
+    action = "player.layout_changed" if previous_layout.id != layout.id else "player.updated"
+    record(db, actor=user, action=action, resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"from_layout": previous_layout.name, "to_layout": layout.name} if action == "player.layout_changed" else None)
+    db.commit(); db.refresh(player); return player_data(player, db)
+
+
+@router.patch("/players/{player_id}/layout")
+def change_player_layout(player_id: str, payload: PlayerLayoutInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player or player.archived_at:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "manage_players", PLAYER, player.id, db)
+    before = effective_layout(player, db)
+    layout = assignable_layout(payload.layout_id, db)
+    old_zone_ids = set(db.scalars(select(Zone.id).where(Zone.layout_id == before.id)).all())
+    new_zone_ids = set(db.scalars(select(Zone.id).where(Zone.layout_id == layout.id)).all())
+    affected = int(db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.destination_type == ZONE, ContentAssignment.destination_id.in_(old_zone_ids - new_zone_ids))) or 0)
+    player.layout_id = layout.id
+    refresh_desired_state(PLAYER, player.id, db)
+    record(db, actor=user, action="player.layout_changed", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"from_layout": before.name, "to_layout": layout.name, "unmatched_zone_assignments": affected})
+    db.commit(); db.refresh(player)
+    return {"player": player_data(player, db), "warning": "Some zone-specific assignments are preserved but are not shown by this display's new layout." if affected else None, "unmatched_zone_assignments": affected}
 
 
 @router.delete("/players/{player_id}")
@@ -415,9 +446,16 @@ def player_enrollment_options(user: User = Depends(auth.get_current_user), db: S
     if not can_manage_any_display(user, db):
         raise HTTPException(status_code=403, detail="You don't have permission to enroll displays.")
     buildings = [building_data(item) for item in db.scalars(select(Building).where(Building.enabled.is_(True)).order_by(Building.name)) if allowed(user, "manage_players", BUILDING, item.id, db)]
-    # Layouts are district-managed in the current permission model. Do not leak
-    # layout names to a building-only administrator.
-    layouts = [layout_data(item) for item in db.scalars(select(Layout).where(Layout.enabled.is_(True), Layout.trashed_at.is_(None)).order_by(Layout.name))] if allowed(user, "manage_layouts", DISTRICT, None, db) else []
+    fallback = full_screen_layout(db)
+    # Persist the lazy seed for a brand-new database before returning it. Most
+    # installations receive this through the migration; this closes the gap
+    # where the first administrator is bootstrapped after migrations run.
+    db.commit()
+    # Building display managers can always select the safe system layout. Users
+    # with district layout administration can also select custom layouts.
+    layouts = [layout_data(fallback)]
+    if allowed(user, "manage_layouts", DISTRICT, None, db):
+        layouts = [layout_data(item) for item in db.scalars(select(Layout).where(Layout.enabled.is_(True), Layout.trashed_at.is_(None)).order_by(Layout.name))]
     return {"buildings": buildings, "layouts": layouts}
 
 
@@ -432,12 +470,12 @@ def validate_player_enrollment(payload: EnrollmentValidationInput, user: User = 
 def prepare_player_enrollment(payload: PlayerInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     scope_valid(BUILDING, payload.building_id, db)
     require(user, "manage_players", BUILDING, payload.building_id, db)
-    if payload.layout_id and not db.get(Layout, payload.layout_id): raise HTTPException(status_code=422, detail="Choose a valid layout.")
-    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, enabled=payload.enabled, resolution=payload.resolution, layout_id=payload.layout_id, enrollment_status="pending", health_state="waiting_for_enrollment")
+    layout = assignable_layout(payload.layout_id, db)
+    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, enabled=payload.enabled, resolution=payload.resolution, layout_id=layout.id, enrollment_status="pending", health_state="waiting_for_enrollment")
     db.add(player); db.flush()
     enrollment = issue_server_enrollment(player, request, user, db, action="player.enrollment_prepared")
     db.commit(); db.refresh(player)
-    return {"player": player_data(player), "enrollment": enrollment_data(enrollment, include_code=True)}
+    return {"player": player_data(player, db), "enrollment": enrollment_data(enrollment, include_code=True)}
 
 
 @router.post("/players/{player_id}/enrollment")
@@ -449,7 +487,7 @@ def regenerate_player_enrollment(player_id: str, request: Request, user: User = 
     if player.device_secret_hash: raise HTTPException(status_code=409, detail="Reset this enrolled device before generating a new enrollment code.")
     enrollment = issue_server_enrollment(player, request, user, db, action="player.enrollment_code_regenerated")
     db.commit()
-    return {"player": player_data(player), "enrollment": enrollment_data(enrollment, include_code=True)}
+    return {"player": player_data(player, db), "enrollment": enrollment_data(enrollment, include_code=True)}
 
 
 @router.delete("/players/{player_id}/enrollment", status_code=204)
@@ -743,7 +781,35 @@ def layout_definition(layout: Layout) -> dict:
 
 
 def layout_data(layout: Layout) -> dict:
-    return {"id": layout.id, "name": layout.name, "description": layout.description, "logical_width": layout.logical_width, "logical_height": layout.logical_height, "enabled": layout.enabled, "locked": layout.locked, "created_at": layout.created_at, "updated_at": layout.updated_at, "zones": [zone_data(zone) for zone in sorted(layout.zones, key=lambda item: (item.z_index, item.name))]}
+    return {"id": layout.id, "name": layout.name, "description": layout.description, "logical_width": layout.logical_width, "logical_height": layout.logical_height, "enabled": layout.enabled, "locked": layout.locked, "system": bool(layout.system_key), "system_key": layout.system_key, "created_at": layout.created_at, "updated_at": layout.updated_at, "zones": [zone_data(zone) for zone in sorted(layout.zones, key=lambda item: (item.z_index, item.name))]}
+
+
+def full_screen_layout(db: Session) -> Layout:
+    layout = db.scalar(select(Layout).where(Layout.system_key == FULL_SCREEN_SYSTEM_KEY))
+    if layout:
+        return layout
+    creator = db.scalar(select(User).order_by(User.super_admin.desc(), User.created_at))
+    if not creator:
+        raise HTTPException(status_code=503, detail="Signal needs an administrator before it can create its default layout.")
+    layout = Layout(id=FULL_SCREEN_LAYOUT_ID, name="Full Screen", description="Signal system fallback layout.", logical_width=1920, logical_height=1080, enabled=True, locked=True, system_key=FULL_SCREEN_SYSTEM_KEY, created_by_id=creator.id)
+    db.add(layout); db.flush()
+    db.add(Zone(id="00000000-0000-4000-8000-000000000002", layout_id=layout.id, name="Main", x=0, y=0, width=1920, height=1080, z_index=0, enabled=True, locked=True))
+    db.flush()
+    return layout
+
+
+def effective_layout(player: Player, db: Session) -> Layout:
+    layout = db.get(Layout, player.layout_id) if player.layout_id else None
+    if layout and layout.enabled and not layout.trashed_at:
+        return layout
+    return full_screen_layout(db)
+
+
+def assignable_layout(layout_id: str | None, db: Session) -> Layout:
+    layout = db.get(Layout, layout_id) if layout_id else full_screen_layout(db)
+    if not layout or layout.trashed_at or not layout.enabled:
+        raise HTTPException(status_code=422, detail="Choose an active layout.")
+    return layout
 
 
 def content_data(item: Content, db: Session) -> dict:
@@ -780,7 +846,13 @@ def affected_players(destination_type: str, destination_id: str, db: Session) ->
     zone = db.get(Zone, destination_id)
     if not zone:
         return []
-    return list(db.scalars(select(Player).where(Player.layout_id == zone.layout_id, Player.archived_at.is_(None))))
+    layout = db.get(Layout, zone.layout_id)
+    query = select(Player).where(Player.archived_at.is_(None))
+    if layout and layout.system_key == FULL_SCREEN_SYSTEM_KEY:
+        query = query.where((Player.layout_id == layout.id) | Player.layout_id.is_(None))
+    else:
+        query = query.where(Player.layout_id == zone.layout_id)
+    return list(db.scalars(query))
 
 
 def refresh_desired_state(destination_type: str, destination_id: str, db: Session) -> None:
@@ -790,8 +862,8 @@ def refresh_desired_state(destination_type: str, destination_id: str, db: Sessio
 
 def player_content_count(player: Player, db: Session) -> int:
     destinations = [player.id]
-    if player.layout_id:
-        destinations.extend(db.scalars(select(Zone.id).where(Zone.layout_id == player.layout_id, Zone.enabled.is_(True))).all())
+    layout = effective_layout(player, db)
+    destinations.extend(db.scalars(select(Zone.id).where(Zone.layout_id == layout.id, Zone.enabled.is_(True))).all())
     return int(db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))) or 0)
 
 
@@ -808,6 +880,8 @@ def assignment_source(item: ContentAssignment, user: User, db: Session) -> tuple
 @router.get("/layouts")
 def list_layouts(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     require(user, "manage_layouts", DISTRICT, None, db)
+    full_screen_layout(db)
+    db.commit()
     return [layout_data(item) for item in db.scalars(select(Layout).where(Layout.trashed_at.is_(None)).order_by(Layout.name))]
 
 
@@ -825,6 +899,7 @@ def create_layout(payload: LayoutInput, request: Request, user: User = Depends(a
 def update_layout(layout_id: str, payload: LayoutInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     require(user, "manage_layouts", DISTRICT, None, db); layout = db.get(Layout, layout_id)
     if not layout or layout.trashed_at: raise HTTPException(status_code=404, detail="Layout not found.")
+    if layout.system_key: raise HTTPException(status_code=403, detail="The Full Screen system layout is read-only. Duplicate it to customize a layout.")
     layout.name, layout.description, layout.enabled, layout.locked = payload.name.strip(), payload.description, payload.enabled, payload.locked
     revision = (db.scalar(select(func.max(LayoutVersion.revision)).where(LayoutVersion.layout_id == layout.id)) or 0) + 1
     db.add(LayoutVersion(layout_id=layout.id, revision=revision, definition=layout_definition(layout), note=payload.note, created_by_id=user.id)); record(db, actor=user, action="layout.updated", resource_type="layout", resource_id=layout.id, resource_name=layout.name, source_ip=auth.client_ip(request)); db.commit(); db.refresh(layout); return layout_data(layout)
@@ -839,6 +914,7 @@ def list_layout_versions(layout_id: str, user: User = Depends(auth.get_current_u
 def restore_layout(layout_id: str, revision: int, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     require(user, "manage_layouts", DISTRICT, None, db); layout = db.get(Layout, layout_id); prior = db.scalar(select(LayoutVersion).where(LayoutVersion.layout_id == layout_id, LayoutVersion.revision == revision))
     if not layout or not prior: raise HTTPException(status_code=404, detail="Layout revision not found.")
+    if layout.system_key: raise HTTPException(status_code=403, detail="The Full Screen system layout is read-only.")
     for zone in list(layout.zones): db.delete(zone)
     for source in prior.definition.get("zones", []): db.add(Zone(layout_id=layout.id, name=source["name"], x=source["x"], y=source["y"], width=source["width"], height=source["height"], z_index=source.get("z_index", 0), background=source.get("background"), border=source.get("border"), padding=source.get("padding", 0), enabled=source.get("enabled", True), locked=source.get("locked", False)))
     db.flush(); next_revision = (db.scalar(select(func.max(LayoutVersion.revision)).where(LayoutVersion.layout_id == layout.id)) or 0) + 1; db.add(LayoutVersion(layout_id=layout.id, revision=next_revision, definition=layout_definition(layout), note=f"Restored revision {revision}", created_by_id=user.id)); record(db, actor=user, action="layout.restored", resource_type="layout", resource_id=layout.id, resource_name=layout.name, source_ip=auth.client_ip(request), metadata={"from_revision": revision}); db.commit(); return layout_data(layout)
@@ -848,6 +924,7 @@ def restore_layout(layout_id: str, revision: int, request: Request, user: User =
 def create_zone(layout_id: str, payload: ZoneInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     require(user, "manage_layouts", DISTRICT, None, db); layout = db.get(Layout, layout_id)
     if not layout or layout.trashed_at: raise HTTPException(status_code=404, detail="Layout not found.")
+    if layout.system_key: raise HTTPException(status_code=403, detail="The Full Screen system layout is read-only. Duplicate it to add zones.")
     if payload.x + payload.width > layout.logical_width or payload.y + payload.height > layout.logical_height: raise HTTPException(status_code=422, detail="Zone must fit within the 1920 × 1080 layout.")
     zone = Zone(layout_id=layout.id, **payload.model_dump()); db.add(zone); db.flush(); record(db, actor=user, action="zone.created", resource_type="zone", resource_id=zone.id, resource_name=zone.name, scope_type=ZONE, scope_id=zone.id, source_ip=auth.client_ip(request)); db.commit(); return zone_data(zone)
 
@@ -857,6 +934,7 @@ def update_zone(zone_id: str, payload: ZoneInput, request: Request, user: User =
     zone = db.get(Zone, zone_id)
     if not zone: raise HTTPException(status_code=404, detail="Zone not found.")
     require(user, "manage_layouts", DISTRICT, None, db)
+    if zone.layout.system_key: raise HTTPException(status_code=403, detail="The Full Screen system layout is read-only.")
     if payload.x + payload.width > 1920 or payload.y + payload.height > 1080: raise HTTPException(status_code=422, detail="Zone must fit within the layout.")
     for key, value in payload.model_dump().items(): setattr(zone, key, value)
     record(db, actor=user, action="zone.updated", resource_type="zone", resource_id=zone.id, resource_name=zone.name, scope_type=ZONE, scope_id=zone.id, source_ip=auth.client_ip(request)); db.commit(); return zone_data(zone)
@@ -866,7 +944,27 @@ def update_zone(zone_id: str, payload: ZoneInput, request: Request, user: User =
 def delete_zone(zone_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     zone = db.get(Zone, zone_id)
     if not zone: raise HTTPException(status_code=404, detail="Zone not found.")
-    require(user, "manage_layouts", DISTRICT, None, db); assigned = db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.destination_type == ZONE, ContentAssignment.destination_id == zone.id)); db.delete(zone); record(db, actor=user, action="zone.deleted", resource_type="zone", resource_id=zone_id, resource_name=zone.name, scope_type=ZONE, scope_id=zone_id, source_ip=auth.client_ip(request), metadata={"assignment_count": assigned}); db.commit(); return {"ok": True, "affected_assignments": assigned}
+    require(user, "manage_layouts", DISTRICT, None, db)
+    if zone.layout.system_key: raise HTTPException(status_code=403, detail="The Full Screen system layout is read-only.")
+    assigned = db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.destination_type == ZONE, ContentAssignment.destination_id == zone.id)); db.delete(zone); record(db, actor=user, action="zone.deleted", resource_type="zone", resource_id=zone_id, resource_name=zone.name, scope_type=ZONE, scope_id=zone_id, source_ip=auth.client_ip(request), metadata={"assignment_count": assigned}); db.commit(); return {"ok": True, "affected_assignments": assigned}
+
+
+@router.delete("/layouts/{layout_id}")
+def delete_layout(layout_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_layouts", DISTRICT, None, db)
+    layout = db.get(Layout, layout_id)
+    if not layout or layout.trashed_at:
+        raise HTTPException(status_code=404, detail="Layout not found.")
+    if layout.system_key:
+        raise HTTPException(status_code=409, detail="The protected Full Screen system layout cannot be removed.")
+    assigned_players = list(db.scalars(select(Player).where(Player.layout_id == layout.id, Player.archived_at.is_(None))))
+    for player in assigned_players:
+        player.layout_id = None
+        refresh_desired_state(PLAYER, player.id, db)
+    layout.trashed_at = datetime.now(UTC)
+    record(db, actor=user, action="layout.deleted", resource_type="layout", resource_id=layout.id, resource_name=layout.name, source_ip=auth.client_ip(request), metadata={"players_returned_to_full_screen": len(assigned_players)})
+    db.commit()
+    return {"ok": True, "players_returned_to_full_screen": len(assigned_players)}
 
 
 def valid_design(document: dict) -> None:
@@ -1042,7 +1140,7 @@ def player_details(player_id: str, user: User = Depends(auth.get_current_user), 
     if not player or player.archived_at:
         raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "view", PLAYER, player.id, db)
-    layout = db.get(Layout, player.layout_id) if player.layout_id else None
+    layout = effective_layout(player, db)
     destinations = {player.id}
     destination_names = {(PLAYER, player.id): "Full display"}
     if layout:
@@ -1054,7 +1152,7 @@ def player_details(player_id: str, user: User = Depends(auth.get_current_user), 
     for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations)).order_by(ContentAssignment.destination_type, ContentAssignment.destination_id, ContentAssignment.position, ContentAssignment.created_at)):
         if allowed(user, "view", assignment.destination_type, assignment.destination_id, db):
             assignments.append({**assignment_data(assignment, db), "destination_name": destination_names.get((assignment.destination_type, assignment.destination_id), "Display")})
-    return {"player": player_data(player), "layout": layout_data(layout) if layout else None, "assignments": assignments}
+    return {"player": player_data(player, db), "layout": layout_data(layout), "assignments": assignments}
 
 
 @router.post("/players/{player_id}/assignments/reorder")
@@ -1068,7 +1166,7 @@ def reorder_player_assignments(player_id: str, payload: AssignmentReorderInput, 
         raise HTTPException(status_code=422, detail="Assignments must belong to this display.")
     if payload.destination_type == ZONE:
         zone = db.get(Zone, payload.destination_id)
-        if not zone or zone.layout_id != player.layout_id:
+        if not zone or zone.layout_id != effective_layout(player, db).id:
             raise HTTPException(status_code=422, detail="Choose a zone from this display's layout.")
     require(user, "schedule", payload.destination_type, payload.destination_id, db)
     assignments = list(db.scalars(select(ContentAssignment).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id).order_by(ContentAssignment.position, ContentAssignment.created_at)))
@@ -1091,7 +1189,7 @@ def list_templates(user: User = Depends(auth.get_current_user), db: Session = De
 
 @router.get("/destinations")
 def list_destinations(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    players = [player_data(item) for item in db.scalars(select(Player).where(Player.archived_at.is_(None)).order_by(Player.name)) if allowed(user, "schedule", PLAYER, item.id, db)]
+    players = [player_data(item, db) for item in db.scalars(select(Player).where(Player.archived_at.is_(None)).order_by(Player.name)) if allowed(user, "schedule", PLAYER, item.id, db)]
     zones = []
     for item in db.scalars(select(Zone).order_by(Zone.name)):
         if allowed(user, "schedule", ZONE, item.id, db): zones.append({**zone_data(item), "layout_name": item.layout.name})
@@ -1120,7 +1218,7 @@ def eligible(assignment: ContentAssignment, now: datetime) -> bool:
 def player_preview(player_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     player = db.get(Player, player_id)
     if not player or player.archived_at: raise HTTPException(status_code=404, detail="Player not found.")
-    require(user, "view", PLAYER, player.id, db); layout = db.get(Layout, player.layout_id) if player.layout_id else None; now = datetime.now(UTC); destinations = [player.id] + ([zone.id for zone in layout.zones if zone.enabled] if layout else [])
+    require(user, "view", PLAYER, player.id, db); layout = effective_layout(player, db); now = datetime.now(UTC); destinations = [player.id] + [zone.id for zone in layout.zones if zone.enabled]
     items = []
     for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))):
         if not eligible(assignment, now):
@@ -1132,4 +1230,4 @@ def player_preview(player_id: str, user: User = Depends(auth.get_current_user), 
             continue
         content = db.get(Content, assignment.content_id) if assignment.content_id else None; published = db.scalar(select(ContentVersion).where(ContentVersion.content_id == assignment.content_id, ContentVersion.state == "published")) if assignment.content_id else None
         if content and published and not content.trashed_at: items.append({"assignment": assignment_data(assignment, db), "content": {"id": content.id, "name": content.name, "revision": version_data(published)}, "destination_type": assignment.destination_type})
-    return {"kind": "server_desired_state", "player": player_data(player), "layout": layout_data(layout) if layout else None, "eligible_assignments": sorted(items, key=lambda item: (item["assignment"]["position"], item["assignment"]["created_at"] or datetime.min.replace(tzinfo=UTC))), "generated_at": now}
+    return {"kind": "server_desired_state", "player": player_data(player, db), "layout": layout_data(layout), "eligible_assignments": sorted(items, key=lambda item: (item["assignment"]["position"], item["assignment"]["created_at"] or datetime.min.replace(tzinfo=UTC))), "generated_at": now}

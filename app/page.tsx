@@ -42,6 +42,7 @@ type Player = {
   cache_state: string;
   content_count?: number;
   archived_at?: string | null;
+  effective_layout?: { id: string; name: string; system: boolean };
 };
 type Layout = {
   id: string;
@@ -49,6 +50,7 @@ type Layout = {
   description?: string;
   enabled: boolean;
   locked: boolean;
+  system?: boolean;
   zones: Zone[];
 };
 type Zone = {
@@ -830,7 +832,7 @@ function SendToDisplayDialog({
             <select value={destination} onChange={(event) => setDestination(event.target.value)} required>
               <option value="">Choose display</option>
               {destinations.players.map((player) => <option key={player.id} value={`player:${player.id}`}>{player.name} · {player.building_name}</option>)}
-              {destinations.zones.map((zone) => <option key={zone.id} value={`zone:${zone.id}`}>{zone.layout_name} · {zone.name}</option>)}
+              {destinations.zones.filter((zone) => zone.layout_name !== "Full Screen").map((zone) => <option key={zone.id} value={`zone:${zone.id}`}>{zone.layout_name} · {zone.name}</option>)}
             </select>
           </label>
           <div className="playback-fields">
@@ -879,11 +881,12 @@ function PlayerDetailsView({
   notify: (message: string) => void;
   onBack: () => void;
 }) {
-  const [details, setDetails] = useState<{ player: Player; assignments: PlayerAssignment[] } | null>(null);
+  const [details, setDetails] = useState<{ player: Player; layout: Layout; assignments: PlayerAssignment[] } | null>(null);
   const [error, setError] = useState("");
   const [adding, setAdding] = useState(false);
   const [sending, setSending] = useState<LibraryItem | null>(null);
   const [editing, setEditing] = useState<PlayerAssignment | null>(null);
+  const [changingLayout, setChangingLayout] = useState(false);
   const [removing, setRemoving] = useState<PlayerAssignment | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const load = useCallback(() => request(`/players/${playerId}`, token).then(setDetails).catch((reason) => setError(reason.message)), [playerId, token]);
@@ -932,6 +935,7 @@ function PlayerDetailsView({
           <p className="eyebrow">DISPLAY</p>
           <h1>{player.name}</h1>
           <p>{player.building_name} · {player.description || "No location details"}</p>
+          <p className="detail-layout">Layout <b>{player.effective_layout?.name || "Full Screen"}</b> <button className="card-text-action" onClick={() => setChangingLayout(true)}>Change Layout</button></p>
           <small>{player.health_state === "online" ? "● Online" : player.health_state === "offline" ? "◐ Offline" : "○ Waiting for connection"} · Last seen {player.last_seen_at ? new Date(player.last_seen_at).toLocaleString() : "never"} · Cache {player.cache_state}</small>
         </div>
         <div className="button-row"><button className="secondary-button" onClick={() => notify("Preview uses the server’s current desired state for this display.")}>Preview</button><button className="secondary-button" onClick={forceSync}>Force Sync</button><button className="primary" onClick={() => setAdding(true)}>+ Add Content</button></div>
@@ -956,9 +960,22 @@ function PlayerDetailsView({
       {adding && <LibraryPickerDialog token={token} onClose={() => setAdding(false)} onSelected={(item) => { setAdding(false); setSending(item); }} />}
       {sending && <SendToDisplayDialog item={sending} token={token} initialDestination={`player:${player.id}`} onClose={() => setSending(null)} onSent={() => { notify(`“${sending.name}” was sent to ${player.name}.`); setSending(null); load(); }} />}
       {editing && <AssignmentEditorDialog assignment={editing} token={token} onClose={() => setEditing(null)} onSaved={() => { notify("Playback settings updated."); setEditing(null); load(); }} />}
+      {changingLayout && <LayoutChangeDialog player={player} currentLayout={details.layout} hasZoneAssignments={assignments.some((item) => item.destination_type === "zone")} token={token} onClose={() => setChangingLayout(false)} onSaved={(message) => { if (message) notify(message); setChangingLayout(false); load(); }} />}
       {removing && <RemoveAssignmentDialog assignment={removing} token={token} onClose={() => setRemoving(null)} onRemoved={() => { notify("Content was removed from this display. The original item remains in Signal."); setRemoving(null); load(); }} />}
     </>
   );
+}
+
+function LayoutChangeDialog({ player, currentLayout, hasZoneAssignments, token, onClose, onSaved }: { player: Player; currentLayout?: Layout; hasZoneAssignments: boolean; token: string; onClose: () => void; onSaved: (message?: string) => void }) {
+  const [layouts, setLayouts] = useState<Layout[]>([]);
+  const [selected, setSelected] = useState(currentLayout?.id || player.effective_layout?.id || "");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { request("/player-enrollments/options", token).then((data) => { setLayouts(data.layouts); if (!selected && data.layouts[0]) setSelected(data.layouts[0].id); }).catch((reason) => setError(reason.message)); }, [token]);
+  const apply = async () => { setBusy(true); setError(""); try { const result = await request(`/players/${player.id}/layout`, token, { method: "PATCH", body: JSON.stringify({ layout_id: selected }) }); onSaved(result.warning || `Layout changed to ${result.player.effective_layout.name}.`); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to change this display layout."); } finally { setBusy(false); } };
+  const preview = layouts.find((layout) => layout.id === selected);
+  const changing = Boolean(selected && selected !== currentLayout?.id);
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal layout-change-modal" role="dialog" aria-modal="true" aria-labelledby="layout-change-title"><header><div><p className="eyebrow">DISPLAY LAYOUT</p><h2 id="layout-change-title">Change Layout</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="layout-change-body"><p>Current: <b>{currentLayout?.name || player.effective_layout?.name || "Full Screen"}</b></p><label>Choose Layout<select value={selected} onChange={(event) => setSelected(event.target.value)}>{layouts.map((layout) => <option key={layout.id} value={layout.id}>{layout.name}{layout.system ? " · System" : ""}</option>)}</select></label>{preview && <div className="layout-mini-preview" aria-label={`${preview.name} preview`}>{preview.zones.map((zone) => <span key={zone.id} style={{ left: `${zone.x / 19.2}%`, top: `${zone.y / 10.8}%`, width: `${zone.width / 19.2}%`, height: `${zone.height / 10.8}%` }}>{zone.name}</span>)}</div>}{changing && <p className="layout-warning">{hasZoneAssignments ? "This display has zone-specific content. Assignments not present in the new layout will be preserved for reassignment; direct display content remains available." : "Direct display content remains available after this layout change."}</p>}{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" onClick={apply} disabled={busy || !selected || selected === currentLayout?.id}>{busy ? "Applying…" : "Apply Layout"}</button></footer></section></div>;
 }
 
 function LibraryPickerDialog({ token, onClose, onSelected }: { token: string; onClose: () => void; onSelected: (item: LibraryItem) => void }) {
@@ -1419,12 +1436,11 @@ function EnrollmentDialog({
               </select>
             </label>
             <label>
-              Layout <small>(recommended)</small>
-              <select name="layout_id" defaultValue="">
-                <option value="">Assign later</option>
+              Layout
+              <select name="layout_id" defaultValue={options.layouts.find((item) => item.system)?.id || options.layouts[0]?.id || ""}>
                 {options.layouts.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.name}
+                    {item.name}{item.system ? " · Default" : ""}
                   </option>
                 ))}
               </select>
@@ -1627,9 +1643,8 @@ function LegacyEnrollmentDialog({
               </select>
             </label>
             <label>
-              Layout <small>(recommended)</small>
-              <select name="layout_id" defaultValue="">
-                <option value="">Assign later</option>
+              Layout
+              <select name="layout_id" defaultValue={options.layouts.find((item) => item.system)?.id || options.layouts[0]?.id || ""}>
                 {options.layouts.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.name}
@@ -1815,6 +1830,18 @@ function LayoutsView({
       setError(e instanceof Error ? e.message : "Unable to add zone.");
     }
   };
+  const remove = async () => {
+    if (!selected || selected.system) return;
+    const confirmed = window.confirm(`Remove “${selected.name}”? Displays assigned to it will return to the Full Screen layout. Content is preserved.`);
+    if (!confirmed) return;
+    try {
+      const result = await request(`/layouts/${selected.id}`, token, { method: "DELETE" });
+      notify(`“${selected.name}” was removed. ${result.players_returned_to_full_screen || 0} display(s) returned to Full Screen.`);
+      reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unable to remove layout.");
+    }
+  };
   return (
     <>
       <div className="page-title">
@@ -1844,13 +1871,13 @@ function LayoutsView({
               onClick={() => setSelected(layout)}
             >
               <b>{layout.name}</b>
-              <small>{layout.zones.length} zones</small>
+              <small>{layout.system ? "System · Default" : `${layout.zones.length} zones`}</small>
             </button>
           ))}
         </div>
         {selected ? (
           <>
-            <h2>{selected.name}</h2>
+            <div className="layout-detail-title"><div><h2>{selected.name}</h2>{selected.system && <small>Protected system fallback · 1 Main zone</small>}</div>{!selected.system && <button className="card-text-action danger" onClick={remove}>Remove layout</button>}</div>
             <div className="layout-canvas">
               {selected.zones.map((item) => (
                 <div
@@ -1870,14 +1897,14 @@ function LayoutsView({
                 </div>
               ))}
             </div>
-            <form onSubmit={zone} className="inline-form">
+            {selected.system ? <p className="layout-system-note">Full Screen is read-only so every display always has a safe fallback. Create a new layout to customize zones.</p> : <form onSubmit={zone} className="inline-form">
               <input name="name" placeholder="Zone name" required />
               <input name="x" type="number" defaultValue="0" min="0" />
               <input name="y" type="number" defaultValue="0" min="0" />
               <input name="width" type="number" defaultValue="960" min="1" />
               <input name="height" type="number" defaultValue="1080" min="1" />
               <button className="secondary-button">Add zone</button>
-            </form>
+            </form>}
           </>
         ) : (
           <Empty text="Create a master layout to define display zones." />

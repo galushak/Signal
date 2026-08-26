@@ -25,6 +25,32 @@ def test_layout_zone_content_publish_assignment_and_preview(client):
     assert preview["eligible_assignments"][0]["content"]["name"] == "Lunch"
 
 
+def test_player_layout_change_and_custom_layout_deletion_return_to_full_screen(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    layouts = test_client.get("/api/v1/layouts", headers=headers).json()
+    full_screen = next(item for item in layouts if item["system"])
+    assert full_screen["name"] == "Full Screen"
+    assert full_screen["zones"][0]["name"] == "Main"
+    assert test_client.delete(f"/api/v1/layouts/{full_screen['id']}", headers=headers).status_code == 409
+
+    custom = test_client.post("/api/v1/layouts", headers=headers, json={"name": "Lobby Test", "enabled": True}).json()
+    changed = test_client.patch(f"/api/v1/players/{ids['cafeteria']}/layout", headers=headers, json={"layout_id": custom["id"]})
+    assert changed.status_code == 200
+    assert changed.json()["player"]["effective_layout"]["id"] == custom["id"]
+    assert changed.json()["player"]["desired_state_revision"]
+    assert test_client.patch(f"/api/v1/players/{ids['cafeteria']}/layout", headers={"Authorization": f"Bearer {login(test_client, 'kitchen')}"}, json={"layout_id": full_screen["id"]}).status_code == 403
+
+    removed = test_client.delete(f"/api/v1/layouts/{custom['id']}", headers=headers)
+    assert removed.status_code == 200
+    assert removed.json()["players_returned_to_full_screen"] == 1
+    player = next(item for item in test_client.get("/api/v1/players", headers=headers).json() if item["id"] == ids["cafeteria"])
+    assert player["layout_id"] is None
+    assert player["effective_layout"]["id"] == full_screen["id"]
+    actions = {event["action"] for event in test_client.get("/api/v1/audit", headers=headers).json()}
+    assert {"player.layout_changed", "layout.deleted"}.issubset(actions)
+
+
 def test_published_versions_are_immutable_and_restore_creates_draft(client):
     test_client, _ = client
     token = login(test_client, "admin")

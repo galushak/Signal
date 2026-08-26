@@ -158,6 +158,7 @@ class Layout(Timestamped, Base):
     logical_height: Mapped[int] = mapped_column(Integer, default=1080)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    system_key: Mapped[str | None] = mapped_column(String(48), unique=True, nullable=True, index=True)
     trashed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     zones: Mapped[list["Zone"]] = relationship(back_populates="layout", cascade="all, delete-orphan")

@@ -65,3 +65,37 @@ def test_regeneration_cancellation_and_expiry_invalidate_codes(client):
     finally:
         routes.settings.enrollment_code_ttl_minutes = original_ttl
     assert enroll_device(test_client, expired["enrollment"]["code"], "expired-device").status_code == 410
+
+
+def test_full_screen_fallback_is_exposed_and_maps_direct_content_to_main(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+
+    # Existing null-layout records are readable as Full Screen before any admin
+    # needs to repair them, and new enrollments store that usable default.
+    existing = next(item for item in test_client.get("/api/v1/players", headers=headers).json() if item["id"] == ids["cafeteria"])
+    assert existing["layout_id"] is None
+    assert existing["effective_layout"]["name"] == "Full Screen"
+    prepared = prepare(test_client, headers, ids["high"], "Fallback PI")
+    assert prepared["player"]["effective_layout"] == {"id": "00000000-0000-4000-8000-000000000001", "name": "Full Screen", "system": True}
+
+    credentials = enroll_device(test_client, prepared["enrollment"]["code"], "fallback-device-0001").json()
+    content = test_client.post("/api/v1/content", headers=headers, json={
+        "name": "Direct fallback content",
+        "design_document": {"schema": "signal.design/v1", "canvas": {"width": 1920, "height": 1080}, "elements": []},
+    }).json()
+    assert test_client.post(f"/api/v1/content/{content['id']}/publish", headers=headers).status_code == 200
+    assert test_client.post(f"/api/v1/content/{content['id']}/assignments", headers=headers, json={
+        "destination_type": "player", "destination_id": prepared["player"]["id"],
+    }).status_code == 201
+    manifest = test_client.get("/api/v1/player-agent/manifest", headers={
+        "X-Signal-Player-ID": credentials["player_id"], "X-Signal-Player-Secret": credentials["device_secret"],
+    })
+    assert manifest.status_code == 200
+    payload = manifest.json()
+    assert payload["layout"]["name"] == "Full Screen"
+    assert payload["layout"]["zones"] == [
+        {"id": "00000000-0000-4000-8000-000000000002", "name": "Main", "x": 0, "y": 0, "width": 1920, "height": 1080, "zIndex": 0, "background": None, "border": None, "padding": 0}
+    ]
+    assert payload["content"][0]["assignment"]["destinationType"] == "zone"
+    assert payload["content"][0]["assignment"]["destinationId"] == "00000000-0000-4000-8000-000000000002"
