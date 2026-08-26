@@ -784,15 +784,25 @@ small,
 .media-grid {
   padding: 22px;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(240px, 300px));
   gap: 17px;
   align-content: start;
 }
 .media-item {
   text-align: left;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: box-shadow .16s ease, border-color .16s ease;
+}
+.media-item:hover {
+  border-color: #d9d5ee;
+  box-shadow: 0 7px 18px #27345112;
 }
 .asset {
-  height: 135px;
+  aspect-ratio: 16 / 9;
+  height: auto;
   border-radius: 9px;
   display: grid;
   place-items: center;
@@ -1637,6 +1647,11 @@ small,
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.thumbnail-fallback {
+  padding: 12px;
+  color: #53408f;
+  font-size: 12px;
 }
 .player-line {
   grid-template-columns: minmax(220px, 2fr) minmax(110px, 1fr) minmax(115px, 1fr) minmax(135px, 1.15fr) 85px minmax(110px, auto);

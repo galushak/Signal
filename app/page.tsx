@@ -122,6 +122,23 @@ type Dashboard = {
   warnings: { player: Player }[];
 };
 
+function LibraryThumbnail({ item, token }: { item: LibraryItem; token: string }) {
+  const [source, setSource] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!item.thumbnail_url) return;
+    let live = true;
+    let objectUrl = "";
+    fetch(`${API}${item.thumbnail_url}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => { if (!response.ok) throw new Error("Thumbnail unavailable"); return response.blob(); })
+      .then((blob) => { objectUrl = URL.createObjectURL(blob); if (live) setSource(objectUrl); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [item.thumbnail_url, token]);
+  const label = item.kind === "design" ? "DESIGN" : item.kind === "video" ? "▶ VIDEO" : item.kind === "pdf" ? "PDF" : "IMAGE";
+  return source && !failed ? <img src={source} alt={`Preview of ${item.name}`} onError={() => setFailed(true)} /> : <span className="thumbnail-fallback">{item.thumbnail_url && !failed ? "Generating preview…" : label}</span>;
+}
+
 function designFor(template: string): DesignDocument {
   const base = {
     schema: "signal.design/v1" as const,
@@ -255,14 +272,12 @@ export default function Home() {
   };
   const navigation = [
     ["dashboard", "▦", "Dashboard"],
-    ["content", "✦", "Content"],
-    ["media", "◫", "Media"],
+    ["media", "◫", "Library"],
     ["players", "▣", "Players"],
     ["buildings", "⌂", "Buildings"],
   ];
   if (user.super_admin)
     navigation.push(
-      ["layouts", "▤", "Layouts"],
       ["users", "♙", "Users & access"],
       ["audit", "◷", "Audit log"],
     );
@@ -633,8 +648,8 @@ function MediaView({
     <>
       <div className="page-title">
         <div>
-          <p className="eyebrow">MEDIA LIBRARY</p>
-          <h1>Media</h1>
+          <p className="eyebrow">SIGNAL LIBRARY</p>
+          <h1>Library</h1>
           <p>
             Images, video, PDFs, and editable Signal designs within your access.
           </p>
@@ -704,19 +719,7 @@ function MediaView({
             library.map((asset) => (
               <article className="media-item" key={`${asset.kind}-${asset.id}`}>
                 <div className="asset art-3">
-                  {asset.thumbnail_url ? (
-                    <img src={`${API}${asset.thumbnail_url}`} alt="" />
-                  ) : (
-                    <span>
-                      {asset.kind === "design"
-                        ? "DESIGN"
-                        : asset.kind === "pdf"
-                          ? "PDF"
-                          : asset.kind === "video"
-                            ? "▶"
-                            : "IMG"}
-                    </span>
-                  )}
+                  <LibraryThumbnail item={asset} token={token} />
                 </div>
                 <b>{asset.name}</b>
                 <small>
@@ -832,7 +835,6 @@ function SendToDisplayDialog({
             <select value={destination} onChange={(event) => setDestination(event.target.value)} required>
               <option value="">Choose display</option>
               {destinations.players.map((player) => <option key={player.id} value={`player:${player.id}`}>{player.name} · {player.building_name}</option>)}
-              {destinations.zones.filter((zone) => zone.layout_name !== "Full Screen").map((zone) => <option key={zone.id} value={`zone:${zone.id}`}>{zone.layout_name} · {zone.name}</option>)}
             </select>
           </label>
           <div className="playback-fields">
@@ -886,7 +888,6 @@ function PlayerDetailsView({
   const [adding, setAdding] = useState(false);
   const [sending, setSending] = useState<LibraryItem | null>(null);
   const [editing, setEditing] = useState<PlayerAssignment | null>(null);
-  const [changingLayout, setChangingLayout] = useState(false);
   const [removing, setRemoving] = useState<PlayerAssignment | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const load = useCallback(() => request(`/players/${playerId}`, token).then(setDetails).catch((reason) => setError(reason.message)), [playerId, token]);
@@ -935,10 +936,10 @@ function PlayerDetailsView({
           <p className="eyebrow">DISPLAY</p>
           <h1>{player.name}</h1>
           <p>{player.building_name} · {player.description || "No location details"}</p>
-          <p className="detail-layout">Layout <b>{player.effective_layout?.name || "Full Screen"}</b> <button className="card-text-action" onClick={() => setChangingLayout(true)}>Change Layout</button></p>
+          <p className="detail-layout">Display mode <b>Full Screen</b></p>
           <small>{player.health_state === "online" ? "● Online" : player.health_state === "offline" ? "◐ Offline" : "○ Waiting for connection"} · Last seen {player.last_seen_at ? new Date(player.last_seen_at).toLocaleString() : "never"} · Cache {player.cache_state}</small>
         </div>
-        <div className="button-row"><button className="secondary-button" onClick={() => notify("Preview uses the server’s current desired state for this display.")}>Preview</button><button className="secondary-button" onClick={forceSync}>Force Sync</button><button className="primary" onClick={() => setAdding(true)}>+ Add Content</button></div>
+        <div className="button-row"><button className="secondary-button" onClick={() => notify("Preview uses the server’s current desired state for this display.")}>Preview</button><button className="secondary-button" onClick={forceSync}>Force Sync</button><button className="primary" onClick={() => setAdding(true)}>+ Add from Library</button></div>
       </section>
       <section className="panel player-content-panel">
         <div className="panel-heading"><div><p className="eyebrow">PLAYBACK</p><h2>Content on this Display</h2><p>Drag items to set the predictable rotation order. Changes sync automatically.</p></div></div>
@@ -960,7 +961,6 @@ function PlayerDetailsView({
       {adding && <LibraryPickerDialog token={token} onClose={() => setAdding(false)} onSelected={(item) => { setAdding(false); setSending(item); }} />}
       {sending && <SendToDisplayDialog item={sending} token={token} initialDestination={`player:${player.id}`} onClose={() => setSending(null)} onSent={() => { notify(`“${sending.name}” was sent to ${player.name}.`); setSending(null); load(); }} />}
       {editing && <AssignmentEditorDialog assignment={editing} token={token} onClose={() => setEditing(null)} onSaved={() => { notify("Playback settings updated."); setEditing(null); load(); }} />}
-      {changingLayout && <LayoutChangeDialog player={player} currentLayout={details.layout} hasZoneAssignments={assignments.some((item) => item.destination_type === "zone")} token={token} onClose={() => setChangingLayout(false)} onSaved={(message) => { if (message) notify(message); setChangingLayout(false); load(); }} />}
       {removing && <RemoveAssignmentDialog assignment={removing} token={token} onClose={() => setRemoving(null)} onRemoved={() => { notify("Content was removed from this display. The original item remains in Signal."); setRemoving(null); load(); }} />}
     </>
   );
@@ -1431,16 +1431,6 @@ function EnrollmentDialog({
                 {options.buildings.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Layout
-              <select name="layout_id" defaultValue={options.layouts.find((item) => item.system)?.id || options.layouts[0]?.id || ""}>
-                {options.layouts.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}{item.system ? " · Default" : ""}
                   </option>
                 ))}
               </select>
