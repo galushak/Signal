@@ -447,6 +447,14 @@ def device_enroll(payload: DeviceEnrollmentInput, request: Request, db: Session 
     player = db.get(Player, enrollment.player_id)
     if not player or not player.enabled:
         raise HTTPException(status_code=409, detail="This prepared display is no longer available.")
+    assigned_elsewhere = db.scalar(
+        select(Player).where(
+            Player.device_identifier == payload.device_identifier,
+            Player.id != player.id,
+        ),
+    )
+    if assigned_elsewhere:
+        raise HTTPException(status_code=409, detail="This device is already enrolled to another display. Reset its enrollment before using a new code.")
     secret = secrets.token_urlsafe(32)
     try:
         enrollment.device_identifier = payload.device_identifier

@@ -147,9 +147,10 @@ class PlayerAgent:
         return {"status": "error", "message": message}
 
     def reset_enrollment(self) -> None:
-        """Development/admin reset that preserves cache and device identity."""
+        """Development reset that preserves cache but creates a fresh device ID."""
         self.identity.pop("player_id", None)
         self.identity.pop("device_secret", None)
+        self.identity["device_identifier"] = str(uuid.uuid4())
         atomic_write(self.identity_path, json.dumps(self.identity).encode())
         self.runtime["enrollment_status"] = "Device needs re-enrollment."
         self.runtime["credential_failures"] = 0
