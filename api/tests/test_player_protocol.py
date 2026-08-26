@@ -99,3 +99,22 @@ def test_full_screen_fallback_is_exposed_and_maps_direct_content_to_main(client)
     ]
     assert payload["content"][0]["assignment"]["destinationType"] == "zone"
     assert payload["content"][0]["assignment"]["destinationId"] == "00000000-0000-4000-8000-000000000002"
+
+
+def test_sending_multiple_designs_appends_independent_player_assignments(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    player = prepare(test_client, headers, ids["high"], "Append test display")["player"]
+    document = {"schema": "signal.design/v1", "canvas": {"width": 1920, "height": 1080}, "elements": []}
+    assignment_ids = []
+    for name in ("Design A", "Design B", "Design C"):
+        design = test_client.post("/api/v1/content", headers=headers, json={"name": name, "design_document": document}).json()
+        assert test_client.post(f"/api/v1/content/{design['id']}/publish", headers=headers).status_code == 200
+        assigned = test_client.post(f"/api/v1/content/{design['id']}/assignments", headers=headers, json={"destination_type": "player", "destination_id": player["id"], "transition": "none"})
+        assert assigned.status_code == 201
+        assignment_ids.append(assigned.json()["id"])
+    details = test_client.get(f"/api/v1/players/{player['id']}", headers=headers).json()
+    assert [item["id"] for item in details["assignments"]] == assignment_ids
+    assert test_client.delete(f"/api/v1/assignments/{assignment_ids[1]}", headers=headers).status_code == 200
+    remaining = test_client.get(f"/api/v1/players/{player['id']}", headers=headers).json()["assignments"]
+    assert [item["id"] for item in remaining] == [assignment_ids[0], assignment_ids[2]]
