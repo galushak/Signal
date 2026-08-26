@@ -222,7 +222,9 @@ class PlayerAgent:
         for command in self.client.get(f"{self.api_url}/player-agent/commands", headers=self.headers()).json():
             status, result = "completed", {}
             try:
-                if command["command"] == "force_sync": self.sync()
+                if command["command"] == "force_sync":
+                    changed = self.sync()
+                    result = {"state": "synced" if changed else "already_up_to_date"}
                 elif command["command"] == "restart_renderer": status, result = self.platform.restart_renderer()
                 elif command["command"] == "clear_cache": shutil.rmtree(self.media_dir, ignore_errors=True); status, result = "completed", {"cache": "cleared"}
                 else: status, result = "unsupported", {"reason": "not supported by this platform"}
@@ -230,10 +232,11 @@ class PlayerAgent:
                 status, result = "failed", {"error": str(exc)}
             self.client.post(f"{self.api_url}/player-agent/commands/{command['id']}/result", headers=self.headers(), json={"status": status, "result": result}).raise_for_status()
 
-    def cycle(self) -> None:
+    def cycle(self, *, sync_state: bool = True) -> None:
         try:
-            self.sync()
-            self.heartbeat()
+            if sync_state:
+                self.sync()
+                self.heartbeat()
             self.commands()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {401, 403} and self.enrolled:

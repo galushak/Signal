@@ -131,6 +131,17 @@ def test_admin_can_edit_and_delete_player(client):
     assert "player.archived" in {event["action"] for event in events}
 
 
+def test_empty_building_can_be_archived_but_a_building_with_displays_cannot(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    empty = test_client.post("/api/v1/buildings", headers=headers, json={"name": "Empty Regression Building", "enabled": True}).json()
+    assert test_client.delete(f"/api/v1/buildings/{empty['id']}", headers=headers).status_code == 200
+    assert empty["id"] not in {item["id"] for item in test_client.get("/api/v1/buildings", headers=headers).json()}
+    blocked = test_client.delete(f"/api/v1/buildings/{ids['high']}", headers=headers)
+    assert blocked.status_code == 409
+    assert "contains 1 display" in blocked.json()["detail"]
+
+
 def test_archiving_enrolled_player_revokes_access_and_preserves_history(client):
     test_client, ids = client
     headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}

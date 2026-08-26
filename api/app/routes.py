@@ -181,8 +181,11 @@ def user_data(user: User, db: Session | None = None) -> dict:
     return {"id": user.id, "username": user.username, "display_name": user.display_name, "enabled": user.enabled, "super_admin": user.super_admin, "last_login_at": user.last_login_at, "created_at": user.created_at, "grants": grants}
 
 
-def building_data(building: Building) -> dict:
-    return {"id": building.id, "name": building.name, "description": building.description, "enabled": building.enabled, "created_at": building.created_at, "updated_at": building.updated_at}
+def building_data(building: Building, db: Session | None = None) -> dict:
+    data = {"id": building.id, "name": building.name, "description": building.description, "enabled": building.enabled, "created_at": building.created_at, "updated_at": building.updated_at}
+    if db is not None:
+        data["player_count"] = db.scalar(select(func.count()).select_from(Player).where(Player.building_id == building.id, Player.archived_at.is_(None))) or 0
+    return data
 
 
 def player_data(player: Player, db: Session | None = None) -> dict:
@@ -286,10 +289,10 @@ def dashboard(user: User = Depends(auth.get_current_user), db: Session = Depends
 @router.get("/buildings")
 def list_buildings(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     ids = visible_building_ids(user, db)
-    query = select(Building).order_by(Building.name)
+    query = select(Building).where(Building.enabled.is_(True)).order_by(Building.name)
     if ids is not None:
         query = query.where(Building.id.in_(ids)) if ids else query.where(False)
-    return [building_data(item) for item in db.scalars(query)]
+    return [building_data(item, db) for item in db.scalars(query)]
 
 
 @router.post("/buildings", status_code=201)
@@ -301,7 +304,7 @@ def create_building(payload: BuildingInput, request: Request, user: User = Depen
     db.add(building); db.flush()
     record(db, actor=user, action="building.created", resource_type="building", resource_id=building.id, resource_name=building.name, scope_type=BUILDING, scope_id=building.id, source_ip=auth.client_ip(request))
     db.commit(); db.refresh(building)
-    return building_data(building)
+    return building_data(building, db)
 
 
 @router.patch("/buildings/{building_id}")
@@ -312,7 +315,21 @@ def update_building(building_id: str, payload: BuildingInput, request: Request, 
     before = {"name": building.name, "enabled": building.enabled}
     building.name, building.description, building.enabled = payload.name.strip(), payload.description, payload.enabled
     record(db, actor=user, action="building.updated", resource_type="building", resource_id=building.id, resource_name=building.name, scope_type=BUILDING, scope_id=building.id, source_ip=auth.client_ip(request), metadata={"before": before})
-    db.commit(); db.refresh(building); return building_data(building)
+    db.commit(); db.refresh(building); return building_data(building, db)
+
+
+@router.delete("/buildings/{building_id}")
+def archive_building(building_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_settings", DISTRICT, None, db)
+    building = db.get(Building, building_id)
+    if not building: raise HTTPException(status_code=404, detail="Building not found.")
+    player_count = db.scalar(select(func.count()).select_from(Player).where(Player.building_id == building.id, Player.archived_at.is_(None))) or 0
+    if player_count:
+        raise HTTPException(status_code=409, detail=f"This building contains {player_count} display{'s' if player_count != 1 else ''}. Move or remove those displays before removing the building.")
+    building.enabled = False
+    record(db, actor=user, action="building.archived", resource_type="building", resource_id=building.id, resource_name=building.name, scope_type=BUILDING, scope_id=building.id, source_ip=auth.client_ip(request))
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/players")
@@ -565,6 +582,19 @@ def queue_player_command(player_id: str, payload: CommandInput, request: Request
     command = PlayerCommand(player_id=player.id, command=payload.command, requested_by_id=user.id)
     db.add(command); db.flush(); record(db, actor=user, action="player.command_queued", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"command": payload.command}); db.commit()
     return {"id": command.id, "status": command.status}
+
+
+@router.get("/players/{player_id}/commands/{command_id}")
+def player_command_status(player_id: str, command_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    """Return a command acknowledgement without pretending queued work succeeded."""
+    player = db.get(Player, player_id)
+    if not player or player.archived_at:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "restart_players", PLAYER, player.id, db)
+    command = db.get(PlayerCommand, command_id)
+    if not command or command.player_id != player.id:
+        raise HTTPException(status_code=404, detail="Command not found.")
+    return {"id": command.id, "command": command.command, "status": command.status, "result": command.result, "completed_at": command.completed_at}
 
 
 @router.get("/users")

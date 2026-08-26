@@ -118,3 +118,21 @@ def test_sending_multiple_designs_appends_independent_player_assignments(client)
     assert test_client.delete(f"/api/v1/assignments/{assignment_ids[1]}", headers=headers).status_code == 200
     remaining = test_client.get(f"/api/v1/players/{player['id']}", headers=headers).json()["assignments"]
     assert [item["id"] for item in remaining] == [assignment_ids[0], assignment_ids[2]]
+
+
+def test_force_sync_reports_player_acknowledgement(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    prepared = prepare(test_client, headers, ids["high"], "Sync acknowledgement")
+    credentials = enroll_device(test_client, prepared["enrollment"]["code"], "sync-device-0001").json()
+    player_id = prepared["player"]["id"]
+    device_headers = {"X-Signal-Player-ID": credentials["player_id"], "X-Signal-Player-Secret": credentials["device_secret"]}
+    queued = test_client.post(f"/api/v1/players/{player_id}/commands", headers=headers, json={"command": "force_sync"})
+    assert queued.status_code == 201
+    command_id = queued.json()["id"]
+    assert test_client.get(f"/api/v1/players/{player_id}/commands/{command_id}", headers=headers).json()["status"] == "queued"
+    assert test_client.get("/api/v1/player-agent/commands", headers=device_headers).json() == [{"id": command_id, "command": "force_sync"}]
+    assert test_client.post(f"/api/v1/player-agent/commands/{command_id}/result", headers=device_headers, json={"status": "completed", "result": {"state": "already_up_to_date"}}).status_code == 200
+    status = test_client.get(f"/api/v1/players/{player_id}/commands/{command_id}", headers=headers).json()
+    assert status["status"] == "completed"
+    assert status["result"] == {"state": "already_up_to_date"}

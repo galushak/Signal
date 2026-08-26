@@ -26,6 +26,7 @@ type Building = {
   name: string;
   description?: string;
   enabled: boolean;
+  player_count?: number;
 };
 type Player = {
   id: string;
@@ -122,22 +123,28 @@ type Dashboard = {
   warnings: { player: Player }[];
 };
 
-function LibraryThumbnail({ item, token }: { item: LibraryItem; token: string }) {
+function AuthenticatedThumbnail({ thumbnailUrl, token, label, alt }: { thumbnailUrl?: string; token: string; label: string; alt: string }) {
   const [source, setSource] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    if (!item.thumbnail_url) return;
+    setSource(null);
+    setFailed(false);
+    if (!thumbnailUrl) return;
     let live = true;
     let objectUrl = "";
-    const thumbnailUrl = item.thumbnail_url.startsWith("/api/v1/") ? `${API.replace(/\/api\/v1$/, "")}${item.thumbnail_url}` : `${API}${item.thumbnail_url}`;
-    fetch(thumbnailUrl, { headers: { Authorization: `Bearer ${token}` } })
+    const url = thumbnailUrl.startsWith("/api/v1/") ? `${API.replace(/\/api\/v1$/, "")}${thumbnailUrl}` : `${API}${thumbnailUrl}`;
+    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       .then((response) => { if (!response.ok) throw new Error("Thumbnail unavailable"); return response.blob(); })
       .then((blob) => { objectUrl = URL.createObjectURL(blob); if (live) setSource(objectUrl); })
       .catch(() => { if (live) setFailed(true); });
     return () => { live = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [item.thumbnail_url, token]);
+  }, [thumbnailUrl, token]);
+  return source && !failed ? <img src={source} alt={alt} onError={() => setFailed(true)} /> : <span className="thumbnail-fallback">{thumbnailUrl && !failed ? "Generating preview…" : label}</span>;
+}
+
+function LibraryThumbnail({ item, token }: { item: LibraryItem; token: string }) {
   const label = item.kind === "design" ? "DESIGN" : item.kind === "video" ? "▶ VIDEO" : item.kind === "pdf" ? "PDF" : "IMAGE";
-  return source && !failed ? <img src={source} alt={`Preview of ${item.name}`} onError={() => setFailed(true)} /> : <span className="thumbnail-fallback">{item.thumbnail_url && !failed ? "Generating preview…" : label}</span>;
+  return <AuthenticatedThumbnail thumbnailUrl={item.thumbnail_url} token={token} label={label} alt={`Preview of ${item.name}`} />;
 }
 
 function designFor(template: string): DesignDocument {
@@ -362,6 +369,7 @@ export default function Home() {
               notify={show}
               initialContentId={libraryDesignId}
               onInitialContentOpened={() => setLibraryDesignId(null)}
+              onDone={() => setView("media")}
             />
           )}
           {view === "media" && (
@@ -891,13 +899,40 @@ function PlayerDetailsView({
   const [editing, setEditing] = useState<PlayerAssignment | null>(null);
   const [removing, setRemoving] = useState<PlayerAssignment | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const load = useCallback(() => request(`/players/${playerId}`, token).then(setDetails).catch((reason) => setError(reason.message)), [playerId, token]);
   useEffect(() => { load(); }, [load]);
   const forceSync = async () => {
     try {
-      await request(`/players/${playerId}/commands`, token, { method: "POST", body: JSON.stringify({ command: "force_sync" }) });
-      notify("Force Sync queued. The player will process it on its next check-in.");
+      if (details?.player.health_state !== "online") {
+        await request(`/players/${playerId}/commands`, token, { method: "POST", body: JSON.stringify({ command: "force_sync" }) });
+        setSyncStatus("Queued — display is offline");
+        notify("Display is offline. Sync will occur when it reconnects.");
+        return;
+      }
+      const command = await request(`/players/${playerId}/commands`, token, { method: "POST", body: JSON.stringify({ command: "force_sync" }) });
+      setSyncStatus("Sending…");
+      const started = Date.now();
+      const check = async (): Promise<void> => {
+        const status = await request(`/players/${playerId}/commands/${command.id}`, token);
+        if (status.status === "queued" || status.status === "delivered") {
+          setSyncStatus(status.status === "delivered" ? "Syncing…" : "Sending…");
+          if (Date.now() - started < 20_000) window.setTimeout(() => void check(), 500);
+          else setSyncStatus("Still queued — the display has not acknowledged yet");
+          return;
+        }
+        if (status.status === "completed") {
+          setSyncStatus(status.result?.state === "already_up_to_date" ? "Already up to date" : "Synced");
+          load();
+          return;
+        }
+        setSyncStatus("Failed");
+        setError(status.result?.error || "The display could not complete the sync.");
+      };
+      void check();
     } catch (reason) {
+      setSyncStatus("Failed");
       setError(reason instanceof Error ? reason.message : "Unable to queue a sync.");
     }
   };
@@ -940,7 +975,7 @@ function PlayerDetailsView({
           <p className="detail-layout">Display mode <b>Full Screen</b></p>
           <small>{player.health_state === "online" ? "● Online" : player.health_state === "offline" ? "◐ Offline" : "○ Waiting for connection"} · Last seen {player.last_seen_at ? new Date(player.last_seen_at).toLocaleString() : "never"} · Cache {player.cache_state}</small>
         </div>
-        <div className="button-row"><button className="secondary-button" onClick={() => notify("Preview uses the server’s current desired state for this display.")}>Preview</button><button className="secondary-button" onClick={forceSync}>Force Sync</button><button className="primary" onClick={() => setAdding(true)}>+ Add from Library</button></div>
+        <div className="button-row"><button className="secondary-button" onClick={() => setPreviewing(true)}>Preview</button><button className="secondary-button" onClick={forceSync}>{syncStatus || "Force Sync"}</button><button className="primary" onClick={() => setAdding(true)}>+ Add from Library</button></div>
       </section>
       <section className="panel player-content-panel">
         <div className="panel-heading"><div><p className="eyebrow">PLAYBACK</p><h2>Content on this Display</h2><p>Drag items to set the predictable rotation order. Changes sync automatically.</p></div></div>
@@ -950,7 +985,7 @@ function PlayerDetailsView({
             {group.items.map((assignment) => (
               <article className={`assigned-content ${assignment.enabled ? "" : "disabled"}`} key={assignment.id} draggable onDragStart={() => setDragging(assignment.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => reorder(group.type, group.id, assignment.id)}>
                 <span className="drag-handle" aria-label="Drag to reorder">☰</span>
-                <div className="assignment-thumb">{assignment.source?.thumbnail_url ? <img src={`${API}${assignment.source.thumbnail_url}`} alt="" /> : <span>{assignment.source?.type === "video" ? "▶" : assignment.source?.type === "pdf" ? "PDF" : assignment.source?.type === "image" ? "IMG" : "DESIGN"}</span>}</div>
+                <div className="assignment-thumb"><AuthenticatedThumbnail thumbnailUrl={assignment.source?.thumbnail_url || undefined} token={token} label={assignment.source?.type === "video" ? "▶" : assignment.source?.type === "pdf" ? "PDF" : assignment.source?.type === "image" ? "IMG" : "DESIGN"} alt={`Preview of ${assignment.source?.name || "content"}`} /></div>
                 <div className="assignment-main"><b>{assignment.source?.name || "Unavailable content"}</b><small>{assignment.source?.type || assignment.source_type} · {assignment.duration_seconds || 20} sec · {assignment.transition || "None"}{assignment.starts_at ? ` · Starts ${new Date(assignment.starts_at).toLocaleString()}` : ""}{assignment.ends_at ? ` · Expires ${new Date(assignment.ends_at).toLocaleString()}` : ""}</small></div>
                 <span className={assignment.enabled ? "state published" : "state draft"}>{assignment.enabled ? "Active" : "Disabled"}</span>
                 <div className="assignment-actions"><button className="secondary-button" onClick={() => setEditing(assignment)}>Edit Playback</button><button className="card-text-action" onClick={() => setRemoving(assignment)}>Remove</button></div>
@@ -963,8 +998,21 @@ function PlayerDetailsView({
       {sending && <SendToDisplayDialog item={sending} token={token} initialDestination={`player:${player.id}`} onClose={() => setSending(null)} onSent={() => { notify(`“${sending.name}” was sent to ${player.name}.`); setSending(null); load(); }} />}
       {editing && <AssignmentEditorDialog assignment={editing} token={token} onClose={() => setEditing(null)} onSaved={() => { notify("Playback settings updated."); setEditing(null); load(); }} />}
       {removing && <RemoveAssignmentDialog assignment={removing} token={token} onClose={() => setRemoving(null)} onRemoved={() => { notify("Content was removed from this display. The original item remains in Signal."); setRemoving(null); load(); }} />}
+      {previewing && <PlayerPreviewDialog playerId={playerId} token={token} onClose={() => setPreviewing(false)} />}
     </>
   );
+}
+
+function PlayerPreviewDialog({ playerId, token, onClose }: { playerId: string; token: string; onClose: () => void }) {
+  const [data, setData] = useState<any>(null);
+  const [index, setIndex] = useState(0);
+  const [error, setError] = useState("");
+  useEffect(() => { request(`/players/${playerId}/preview`, token).then(setData).catch((reason) => setError(reason.message)); }, [playerId, token]);
+  const items = data?.eligible_assignments || [];
+  const item = items[index];
+  const source = item?.assignment?.source;
+  const label = source?.type === "video" ? "▶ VIDEO" : source?.type === "pdf" ? "PDF" : source?.type === "image" ? "IMAGE" : "DESIGN";
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal player-preview-modal" role="dialog" aria-modal="true" aria-labelledby="player-preview-title"><header><div><p className="eyebrow">EXPECTED PLAYER OUTPUT</p><h2 id="player-preview-title">{data?.player?.name || "Display"} Preview</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header>{error ? <p className="enrollment-error">{error}</p> : !data ? <Loading /> : !item ? <Empty text="No currently eligible content is assigned to this display." /> : <><div className="player-preview-stage"><AuthenticatedThumbnail thumbnailUrl={source?.thumbnail_url} token={token} label={label} alt={`Expected output: ${source?.name || "content"}`} /></div><div className="player-preview-caption"><div><b>{source?.name || item.content?.name || item.media?.name}</b><small>{source?.type || item.media?.type || "design"} · {item.assignment.duration_seconds || 20} sec · Full Screen / Main</small></div>{items.length > 1 && <div className="button-row"><button className="secondary-button" onClick={() => setIndex((index + items.length - 1) % items.length)}>Previous</button><span>{index + 1} / {items.length}</span><button className="secondary-button" onClick={() => setIndex((index + 1) % items.length)}>Next</button></div>}</div></>}</section></div>;
 }
 
 function LayoutChangeDialog({ player, currentLayout, hasZoneAssignments, token, onClose, onSaved }: { player: Player; currentLayout?: Layout; hasZoneAssignments: boolean; token: string; onClose: () => void; onSaved: (message?: string) => void }) {
@@ -985,7 +1033,7 @@ function LibraryPickerDialog({ token, onClose, onSelected }: { token: string; on
   const [kind, setKind] = useState("all");
   const [error, setError] = useState("");
   useEffect(() => { request(`/library?kind=${kind}&search=${encodeURIComponent(search)}`, token).then(setItems).catch((reason) => setError(reason.message)); }, [kind, search, token]);
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal library-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><header><div><p className="eyebrow">LIBRARY</p><h2 id="picker-title">Add Content</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="picker-controls"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search library" /><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All types</option><option value="design">Designs</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option></select></div>{error ? <p className="enrollment-error">{error}</p> : <div className="picker-items">{items.map((item) => <button key={`${item.kind}-${item.id}`} className="picker-item" onClick={() => onSelected(item)}><span>{item.kind.toUpperCase()}</span><div><b>{item.name}</b><small>{item.status}</small></div></button>)}</div>}</section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal library-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><header><div><p className="eyebrow">LIBRARY</p><h2 id="picker-title">Add Content</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="picker-controls"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search library" /><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All types</option><option value="design">Designs</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option></select></div>{error ? <p className="enrollment-error">{error}</p> : <div className="picker-items">{items.map((item) => <button key={`${item.kind}-${item.id}`} className="picker-item" onClick={() => onSelected(item)}><div className="picker-thumb"><LibraryThumbnail item={item} token={token} /></div><div><b>{item.name}</b><small>{item.kind.toUpperCase()} · {item.status}</small></div></button>)}</div>}</section></div>;
 }
 
 function AssignmentEditorDialog({ assignment, token, onClose, onSaved }: { assignment: PlayerAssignment; token: string; onClose: () => void; onSaved: () => void }) {
@@ -1016,6 +1064,7 @@ function PlayersView({
   const [showEnrollment, setShowEnrollment] = useState(false);
   const [editingPlayer, setEditingPlayer] = useState<Player | null>(null);
   const [removingPlayer, setRemovingPlayer] = useState<Player | null>(null);
+  const [previewPlayerId, setPreviewPlayerId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const reload = useCallback(
     () =>
@@ -1121,7 +1170,7 @@ function PlayersView({
                   <div><dt>Last seen</dt><dd>{player.last_seen_at ? new Date(player.last_seen_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "—"}</dd></div>
                 </dl>
                 <footer>
-                  <button className="secondary-button" onClick={() => onManage(player.id)}>Preview</button>
+                  <button className="secondary-button" onClick={() => setPreviewPlayerId(player.id)}>Preview</button>
                   <button className="primary" onClick={() => onManage(player.id)}>Manage Display</button>
                   <button className="card-text-action" onClick={() => setEditingPlayer(player)}>Edit</button>
                   <button className="card-text-action danger" onClick={() => setRemovingPlayer(player)}>Remove</button>
@@ -1168,6 +1217,7 @@ function PlayersView({
           }}
         />
       )}
+      {previewPlayerId && <PlayerPreviewDialog playerId={previewPlayerId} token={token} onClose={() => setPreviewPlayerId(null)} />}
     </>
   );
 }
@@ -1679,6 +1729,8 @@ function BuildingsView({
 }) {
   const [items, setItems] = useState<Building[]>([]);
   const [error, setError] = useState("");
+  const [editing, setEditing] = useState<Building | null>(null);
+  const [removing, setRemoving] = useState<Building | null>(null);
   const reload = useCallback(
     () =>
       request("/buildings", token)
@@ -1731,16 +1783,17 @@ function BuildingsView({
         <section className="panel functional-panel">
           {items.length ? (
             items.map((item) => (
-              <div className="content-line simple-line" key={item.id}>
+              <div className="content-line simple-line building-line" key={item.id}>
                 <div>
                   <b>{item.name}</b>
-                  <small>{item.description || "No description"}</small>
+                  <small>{item.description || "No description"} · {item.player_count || 0} display{item.player_count === 1 ? "" : "s"}</small>
                 </div>
                 <span
                   className={item.enabled ? "state published" : "state draft"}
                 >
                   {item.enabled ? "Active" : "Disabled"}
                 </span>
+                <div className="button-row"><button className="secondary-button" onClick={() => setEditing(item)}>Edit</button><button className="card-text-action danger" onClick={() => setRemoving(item)}>Remove</button></div>
               </div>
             ))
           ) : (
@@ -1748,8 +1801,22 @@ function BuildingsView({
           )}
         </section>
       )}
+      {editing && <BuildingEditorDialog building={editing} token={token} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); notify("Building updated."); reload(); }} />}
+      {removing && <RemoveBuildingDialog building={removing} token={token} onClose={() => setRemoving(null)} onRemoved={() => { setRemoving(null); notify("Building removed from active Buildings."); reload(); }} />}
     </>
   );
+}
+
+function BuildingEditorDialog({ building, token, onClose, onSaved }: { building: Building; token: string; onClose: () => void; onSaved: () => void }) {
+  const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); try { await request(`/buildings/${building.id}`, token, { method: "PATCH", body: JSON.stringify({ name: form.get("name"), description: form.get("description") || null, enabled: form.get("enabled") === "on" }) }); onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update building."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="building-edit-title"><header><div><p className="eyebrow">BUILDING</p><h2 id="building-edit-title">Edit {building.name}</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={save}><label>Name<input name="name" defaultValue={building.name} required /></label><label>Description<input name="description" defaultValue={building.description || ""} /></label><label className="checkbox-label"><input name="enabled" type="checkbox" defaultChecked={building.enabled} />Active</label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save changes"}</button></footer></form></section></div>;
+}
+
+function RemoveBuildingDialog({ building, token, onClose, onRemoved }: { building: Building; token: string; onClose: () => void; onRemoved: () => void }) {
+  const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const remove = async () => { setBusy(true); try { await request(`/buildings/${building.id}`, token, { method: "DELETE" }); onRemoved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to remove building."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="building-remove-title"><header><div><p className="eyebrow">REMOVE BUILDING</p><h2 id="building-remove-title">Remove {building.name}?</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="remove-player-copy"><p>This archives the empty building. Historical audit records are kept.</p>{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="danger-button" onClick={remove} disabled={busy}>{busy ? "Removing…" : "Remove building"}</button></footer></section></div>;
 }
 
 function LayoutsView({
@@ -1910,11 +1977,13 @@ function ContentView({
   notify,
   initialContentId,
   onInitialContentOpened,
+  onDone,
 }: {
   token: string;
   notify: (m: string) => void;
   initialContentId: string | null;
   onInitialContentOpened: () => void;
+  onDone: () => void;
 }) {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [selected, setSelected] = useState<ContentItem | null>(null);
@@ -2104,6 +2173,7 @@ function ContentView({
         onBack={() => {
           setEditing(false);
           reload();
+          onDone();
         }}
         onChanged={persistDesign}
       />
