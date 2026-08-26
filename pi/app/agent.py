@@ -163,7 +163,12 @@ class PlayerAgent:
             target = self.media_dir / asset_id
             if target.is_file() and self._sha256(target) == asset["sha256"]:
                 continue
-            response = self.client.get(f"{self.api_url}{asset['path']}", headers=self.headers())
+            path = asset["path"]
+            # Manifest paths may be API-relative or already include /api/v1.
+            # Build one canonical URL rather than accidentally producing
+            # /api/v1/api/v1/... and aborting the heartbeat cycle on a 404.
+            base = self.server_url if path.startswith("/api/v1/") else self.api_url
+            response = self.client.get(f"{base}{path}", headers=self.headers())
             response.raise_for_status()
             digest = hashlib.sha256(response.content).hexdigest()
             if digest != asset["sha256"]:

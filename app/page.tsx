@@ -129,7 +129,8 @@ function LibraryThumbnail({ item, token }: { item: LibraryItem; token: string })
     if (!item.thumbnail_url) return;
     let live = true;
     let objectUrl = "";
-    fetch(`${API}${item.thumbnail_url}`, { headers: { Authorization: `Bearer ${token}` } })
+    const thumbnailUrl = item.thumbnail_url.startsWith("/api/v1/") ? `${API.replace(/\/api\/v1$/, "")}${item.thumbnail_url}` : `${API}${item.thumbnail_url}`;
+    fetch(thumbnailUrl, { headers: { Authorization: `Bearer ${token}` } })
       .then((response) => { if (!response.ok) throw new Error("Thumbnail unavailable"); return response.blob(); })
       .then((blob) => { objectUrl = URL.createObjectURL(blob); if (live) setSource(objectUrl); })
       .catch(() => { if (live) setFailed(true); });
