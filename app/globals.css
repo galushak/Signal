@@ -1658,7 +1658,7 @@ small,
 }
 .player-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 360px));
   gap: 16px;
 }
 .display-card,
@@ -1669,7 +1669,8 @@ small,
   box-shadow: 0 8px 24px #28385a0c;
 }
 .display-card {
-  padding: 19px;
+  padding: 0 18px 16px;
+  overflow: hidden;
 }
 .display-card header,
 .display-card footer,
@@ -1703,10 +1704,30 @@ small,
   color: #718098;
   font-size: 12px;
 }
+.player-card-preview {
+  width: calc(100% + 36px);
+  margin: 0 -18px 15px;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  padding: 0;
+  display: block;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  background: linear-gradient(135deg, #2c2452, #171b2e);
+  color: #e8e1fb;
+  font: inherit;
+}
+.player-card-preview img { position:absolute; inset:0; width:100%; height:100%; object-position:center center; }
+.player-card-preview img.thumbnail-contain { object-fit:contain; background:#000; }
+.player-card-preview img.thumbnail-cover { object-fit:cover; }
+.player-card-preview span { display:grid; place-items:center; width:100%; height:100%; font-size:12px; }
+.player-card-preview:focus-visible { outline:3px solid #7a65cf; outline-offset:-3px; }
 .display-location {
   min-height: 19px;
-  margin: 17px 0 11px;
+  margin: 11px 0 9px;
 }
+.display-health { min-height:35px; margin:0 0 14px; color:#718098; font-size:11px; line-height:1.45; }
 .display-facts {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1885,13 +1906,18 @@ small,
   margin: 18px 22px 0;
   overflow: hidden;
   border-radius: 9px;
-  display: grid;
-  place-items: center;
+  position: relative;
   background: #10121b;
 }
 .player-preview-stage img {
+  position: absolute;
+  inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
+  object-position: center center;
   object-fit: contain;
 }
 .player-preview-stage img.thumbnail-cover { object-fit: cover; }

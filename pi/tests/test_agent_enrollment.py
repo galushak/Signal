@@ -51,3 +51,10 @@ def test_player_renderer_does_not_replace_the_dom_for_the_same_item():
     """Polling may call draw repeatedly, but unchanged playback must be inert."""
     assert "if(renderedKey===key)return" in PLAYER_HTML
     assert "let renderedKey=''" in PLAYER_HTML
+
+
+def test_direct_media_frame_maps_fit_and_fill_without_grid_sizing():
+    assert "function mediaFrame(type,id,displayMode)" in PLAYER_HTML
+    assert "displayMode==='fill'?'cover':'contain'" in PLAYER_HTML
+    assert "object-position:center center" in PLAYER_HTML
+    assert "display:grid;place-items:center" not in PLAYER_HTML

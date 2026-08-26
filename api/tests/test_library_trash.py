@@ -1,6 +1,8 @@
 from base64 import b64decode
 
 from test_functional_core import client, login
+from app.models import ContentAssignment
+from app.player_protocol import _assignment_data
 
 
 def document(asset_id: str | None = None) -> dict:
@@ -21,6 +23,11 @@ def test_default_display_mode_and_manifest_mode(client):
     changed = test_client.patch(f"/api/v1/assignments/{assignment.json()['id']}", headers=headers, json={"destination_type": "player", "destination_id": ids["cafeteria"], "display_mode": "fill"})
     assert changed.status_code == 200
     assert changed.json()["display_mode"] == "fill"
+
+
+def test_legacy_missing_display_mode_resolves_to_fit_in_manifest():
+    assignment = ContentAssignment(destination_type="player", destination_id="player", created_by_id="user", display_mode=None)
+    assert _assignment_data(assignment)["displayMode"] == "fit"
 
 
 def test_design_trash_removes_assignments_then_restores(client):

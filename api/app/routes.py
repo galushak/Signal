@@ -345,7 +345,7 @@ def archive_building(building_id: str, request: Request, user: User = Depends(au
 def list_players(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     ids = visible_player_ids(user, db); query = select(Player).where(Player.archived_at.is_(None)).order_by(Player.name)
     if ids is not None: query = query.where(Player.id.in_(ids)) if ids else query.where(False)
-    return [{**player_data(item, db), "content_count": player_content_count(item, db)} for item in db.scalars(query)]
+    return [{**player_data(item, db), "content_count": player_content_count(item, db), "expected_output": player_expected_output(item, db)} for item in db.scalars(query)]
 
 
 @router.post("/players", status_code=201)
@@ -950,6 +950,19 @@ def player_content_count(player: Player, db: Session) -> int:
     layout = effective_layout(player, db)
     destinations.extend(db.scalars(select(Zone.id).where(Zone.layout_id == layout.id, Zone.enabled.is_(True))).all())
     return int(db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))) or 0)
+
+
+def player_expected_output(player: Player, db: Session) -> dict | None:
+    """A cheap, truthful card hint—not a live renderer or player screenshot."""
+    layout = effective_layout(player, db)
+    destinations = {player.id, *(zone.id for zone in layout.zones if zone.enabled)}
+    for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations)).order_by(ContentAssignment.position, ContentAssignment.created_at)):
+        if not eligible(assignment, datetime.now(UTC)):
+            continue
+        data = assignment_data(assignment, db)
+        if data.get("source"):
+            return {"name": data["source"]["name"], "type": data["source"]["type"], "thumbnail_url": data["source"].get("thumbnail_url"), "display_mode": data.get("display_mode", "fit")}
+    return None
 
 
 def assignment_source(item: ContentAssignment, user: User, db: Session) -> tuple[str, str]:

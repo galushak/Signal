@@ -42,6 +42,7 @@ type Player = {
   last_seen_at?: string;
   cache_state: string;
   content_count?: number;
+  expected_output?: { name: string; type: string; thumbnail_url?: string | null; display_mode: "fit" | "fill" } | null;
   archived_at?: string | null;
   effective_layout?: { id: string; name: string; system: boolean };
 };
@@ -1081,6 +1082,7 @@ function PlayersView({
   const [players, setPlayers] = useState<Player[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [showEnrollment, setShowEnrollment] = useState(false);
+  const [addingPlaceholder, setAddingPlaceholder] = useState(false);
   const [editingPlayer, setEditingPlayer] = useState<Player | null>(null);
   const [removingPlayer, setRemovingPlayer] = useState<Player | null>(null);
   const [menuPlayer, setMenuPlayer] = useState<Player | null>(null);
@@ -1132,38 +1134,17 @@ function PlayersView({
           <h1>Players</h1>
           <p>Player status is reported by real devices only.</p>
         </div>
-        <button className="primary" onClick={() => setShowEnrollment(true)}>
-          Enroll Display
-        </button>
+        <div className="button-row"><button className="primary" onClick={() => setShowEnrollment(true)}>Enroll Display</button><button className="secondary-button" aria-label="More player actions" title="More player actions" onClick={() => setAddingPlaceholder(true)}>⋯</button></div>
       </div>
-      <details className="placeholder-player">
-        <summary>More options</summary>
-        <p>
-          Use this only for a record without a physical Signal Player. Real
-          devices should be enrolled above.
-        </p>
-        <form onSubmit={add} className="inline-form">
-          <input name="name" placeholder="e.g. HS Cafeteria" required />
-          <select name="building_id" required defaultValue="">
-            <option value="" disabled>
-              Choose building
-            </option>
-            {buildings.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-          <input name="description" placeholder="Location (optional)" />
-          <button className="secondary-button">Add Placeholder Display</button>
-        </form>
-      </details>
       {error && <ErrorState message={error} />}
       {!error && (
         <section className="player-card-grid">
           {players.length ? (
             players.map((player) => (
               <article className="display-card" key={player.id}>
+                <button className="player-card-preview" onClick={() => setPreviewPlayerId(player.id)} aria-label={`Expected output for ${player.name}`}>
+                  {player.expected_output ? <AuthenticatedThumbnail thumbnailUrl={player.expected_output.thumbnail_url || undefined} token={token} label={player.expected_output.type.toUpperCase()} fit={player.expected_output.display_mode === "fill" ? "cover" : "contain"} alt={`Expected output for ${player.name}`} /> : <span>{player.enrollment_status === "pending" ? "Waiting for enrollment" : "No content assigned"}</span>}
+                </button>
                 <header>
                   <div>
                     <button className="display-name" onClick={() => onManage(player.id)}>
@@ -1183,12 +1164,8 @@ function PlayersView({
                             : "Never connected"}
                   </span>
                 </header>
-                <p className="display-location">{player.description || "No location details"}</p>
-                <dl className="display-facts">
-                  <div><dt>Content</dt><dd>{player.content_count || 0} item{player.content_count === 1 ? "" : "s"}</dd></div>
-                  <div><dt>Cache</dt><dd>{player.cache_state || "Unknown"}</dd></div>
-                  <div><dt>Last seen</dt><dd>{player.last_seen_at ? new Date(player.last_seen_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "—"}</dd></div>
-                </dl>
+                <p className="display-location">{player.building_name}{player.description ? ` · ${player.description}` : ""}</p>
+                {player.health_state !== "waiting_for_enrollment" && <p className="display-health">{player.content_count || 0} item{player.content_count === 1 ? "" : "s"} · Cache {player.cache_state || "unknown"}<br />{player.last_seen_at ? `Seen ${new Date(player.last_seen_at).toLocaleString()}` : "Never connected"}</p>}
                 <footer>
                   <button className="secondary-button" onClick={() => setPreviewPlayerId(player.id)}>Preview</button>
                   <button className="primary" onClick={() => onManage(player.id)}>Manage Display</button>
@@ -1211,6 +1188,7 @@ function PlayersView({
           }}
         />
       )}
+      {addingPlaceholder && <PlaceholderPlayerDialog buildings={buildings} onClose={() => setAddingPlaceholder(false)} onSubmit={add} />}
       {editingPlayer && (
         <PlayerEditorDialog
           player={editingPlayer}
@@ -1236,7 +1214,7 @@ function PlayersView({
           }}
         />
       )}
-      {menuPlayer && <PlayerMoreDialog player={menuPlayer} onClose={() => setMenuPlayer(null)} onEdit={() => { setEditingPlayer(menuPlayer); setMenuPlayer(null); }} onRemove={() => { setRemovingPlayer(menuPlayer); setMenuPlayer(null); }} />}
+      {menuPlayer && <PlayerMoreDialog player={menuPlayer} token={token} onClose={() => setMenuPlayer(null)} onEdit={() => { setEditingPlayer(menuPlayer); setMenuPlayer(null); }} onRemove={() => { setRemovingPlayer(menuPlayer); setMenuPlayer(null); }} onForceSync={() => notify(`Force Sync queued for ${menuPlayer.name}.`)} />}
       {previewPlayerId && <PlayerPreviewDialog playerId={previewPlayerId} token={token} onClose={() => setPreviewPlayerId(null)} />}
     </>
   );
@@ -1740,8 +1718,14 @@ function LegacyEnrollmentDialog({
   );
 }
 
-function PlayerMoreDialog({ player, onClose, onEdit, onRemove }: { player: Player; onClose: () => void; onEdit: () => void; onRemove: () => void }) {
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal compact-actions" role="dialog" aria-modal="true" aria-labelledby="player-more-title"><header><div><p className="eyebrow">DISPLAY ACTIONS</p><h2 id="player-more-title">{player.name}</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="modal-action-list"><button className="secondary-button" onClick={onEdit}>Edit Display</button><button className="danger-button" onClick={onRemove}>Remove Display</button></div></section></div>;
+function PlaceholderPlayerDialog({ buildings, onClose, onSubmit }: { buildings: Building[]; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="placeholder-title"><header><div><p className="eyebrow">ADMINISTRATION</p><h2 id="placeholder-title">Add Placeholder Display</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={onSubmit}><p className="form-help">Use this only for a record without a physical Signal Player.</p><label>Name<input name="name" placeholder="e.g. HS Cafeteria" required /></label><label>Building<select name="building_id" required defaultValue=""><option value="" disabled>Choose building</option>{buildings.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Location<input name="description" placeholder="Location (optional)" /></label><footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary">Add Placeholder Display</button></footer></form></section></div>;
+}
+
+function PlayerMoreDialog({ player, token, onClose, onEdit, onRemove, onForceSync }: { player: Player; token: string; onClose: () => void; onEdit: () => void; onRemove: () => void; onForceSync: () => void }) {
+  const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const forceSync = async () => { setBusy(true); try { await request(`/players/${player.id}/commands`, token, { method: "POST", body: JSON.stringify({ command: "force_sync" }) }); onForceSync(); onClose(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to queue Force Sync."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal compact-actions" role="dialog" aria-modal="true" aria-labelledby="player-more-title"><header><div><p className="eyebrow">DISPLAY ACTIONS</p><h2 id="player-more-title">{player.name}</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="modal-action-list"><button className="secondary-button" onClick={onEdit}>Edit Display</button><button className="secondary-button" onClick={forceSync} disabled={busy}>{busy ? "Queuing…" : "Force Sync"}</button><button className="danger-button" onClick={onRemove}>Remove Display</button>{error && <p className="enrollment-error">{error}</p>}</div></section></div>;
 }
 
 function BuildingsView({
