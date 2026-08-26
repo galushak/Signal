@@ -68,17 +68,11 @@ class PlayerInput(BaseModel):
     layout_id: str | None = None
 
 
-class EnrollmentClaimInput(BaseModel):
-    code: str = Field(min_length=4, max_length=32)
-    name: str = Field(min_length=1, max_length=160)
-    building_id: str
-    layout_id: str | None = None
-    description: str | None = None
-
-
-class AgentEnrollmentInput(BaseModel):
+class DeviceEnrollmentInput(BaseModel):
     code: str = Field(min_length=4, max_length=32)
     device_identifier: str = Field(min_length=8, max_length=255)
+    software_version: str = Field(default="unknown", max_length=80)
+    platform_metadata: dict | None = None
 
 
 class EnrollmentValidationInput(BaseModel):
@@ -181,7 +175,7 @@ def building_data(building: Building) -> dict:
 
 def player_data(player: Player) -> dict:
     last_seen = auth.utc_datetime(player.last_seen_at) if player.last_seen_at else None
-    state = "never_connected" if not last_seen else ("online" if datetime.now(UTC) - last_seen <= timedelta(seconds=75) else "offline")
+    state = "waiting_for_enrollment" if player.enrollment_status == "pending" else ("not_enrolled" if player.enrollment_status == "not_enrolled" else ("never_connected" if not last_seen else ("online" if datetime.now(UTC) - last_seen <= timedelta(seconds=75) else "offline")))
     runtime = player.runtime_data or {}
     return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
 
@@ -333,37 +327,54 @@ def update_player(player_id: str, payload: PlayerInput, request: Request, user: 
     db.commit(); db.refresh(player); return player_data(player)
 
 
-@router.post("/players/{player_id}/enrollment-code")
-def issue_enrollment_code(player_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    player = db.get(Player, player_id)
-    if not player: raise HTTPException(status_code=404, detail="Player not found.")
-    require(user, "manage_players", PLAYER, player.id, db)
-    code = secrets.token_urlsafe(8).upper()
-    player.enrollment_status, player.enrollment_code_hash, player.enrollment_expires_at = "pending", auth.hash_password(code), datetime.now(UTC) + timedelta(minutes=30)
-    record(db, actor=user, action="player.enrollment_code_issued", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
-    db.commit(); return {"code": code, "expires_at": player.enrollment_expires_at}
+ENROLLMENT_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
-def pending_enrollment(code: str, db: Session, *, require_unclaimed: bool = False) -> PlayerEnrollment:
-    now = datetime.now(UTC)
-    for enrollment in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.expires_at > now)).all():
-        if auth.verify_password(code, enrollment.code_hash):
-            if require_unclaimed and enrollment.claimed_at:
-                raise HTTPException(status_code=409, detail="This enrollment code has already been claimed.")
-            return enrollment
-    raise HTTPException(status_code=404, detail="Enrollment code was not found or has expired.")
+def normal_enrollment_code(code: str) -> str:
+    return code.strip().upper().replace(" ", "")
+
+
+def new_enrollment_code() -> str:
+    raw = "".join(secrets.choice(ENROLLMENT_ALPHABET) for _ in range(6))
+    return f"{raw[:3]}-{raw[3:]}"
+
+
+def enrollment_state(enrollment: PlayerEnrollment) -> str:
+    if enrollment.claimed_at:
+        return "used"
+    if enrollment.cancelled_at:
+        return "cancelled"
+    if auth.utc_datetime(enrollment.expires_at) <= datetime.now(UTC):
+        return "expired"
+    return "valid"
 
 
 def enrollment_code_state(code: str, db: Session) -> tuple[PlayerEnrollment | None, str]:
-    """Return a UI-safe code status; device secrets never leave this helper."""
-    for enrollment in db.scalars(select(PlayerEnrollment)).all():
-        if auth.verify_password(code.upper(), enrollment.code_hash):
-            if enrollment.claimed_at:
-                return enrollment, "used"
-            if auth.utc_datetime(enrollment.expires_at) <= datetime.now(UTC):
-                return enrollment, "expired"
-            return enrollment, "valid"
+    """Find a hashed code without exposing durable credentials."""
+    normalized = normal_enrollment_code(code)
+    for enrollment in db.scalars(select(PlayerEnrollment).order_by(PlayerEnrollment.created_at.desc())).all():
+        if auth.verify_password(normalized, enrollment.code_hash):
+            return enrollment, enrollment_state(enrollment)
     return None, "invalid"
+
+
+def enrollment_data(enrollment: PlayerEnrollment, *, include_code: bool) -> dict:
+    data = {"id": enrollment.id, "status": enrollment_state(enrollment), "expires_at": enrollment.expires_at, "player_id": enrollment.player_id}
+    if include_code and enrollment.display_code and not enrollment.claimed_at and not enrollment.cancelled_at:
+        data["code"] = enrollment.display_code
+    return data
+
+
+def issue_server_enrollment(player: Player, request: Request, user: User, db: Session, *, action: str) -> PlayerEnrollment:
+    now = datetime.now(UTC)
+    for pending in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.player_id == player.id, PlayerEnrollment.claimed_at.is_(None), PlayerEnrollment.cancelled_at.is_(None))).all():
+        pending.cancelled_at, pending.display_code = now, None
+    code = new_enrollment_code()
+    enrollment = PlayerEnrollment(player_id=player.id, created_by_id=user.id, code_hash=auth.hash_password(code), display_code=code, expires_at=now + timedelta(minutes=settings.enrollment_code_ttl_minutes))
+    player.enrollment_status = "pending"
+    db.add(enrollment); db.flush()
+    record(db, actor=user, action=action, resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"enrollment_id": enrollment.id})
+    return enrollment
 
 
 def can_manage_any_display(user: User, db: Session) -> bool:
@@ -388,64 +399,85 @@ def validate_player_enrollment(payload: EnrollmentValidationInput, user: User = 
     _, state = enrollment_code_state(payload.code, db)
     return {"status": state}
 
-
-@router.post("/player-agent/enrollment/start")
-def start_agent_enrollment(payload: AgentEnrollmentInput, db: Session = Depends(get_db)):
-    """Register the code displayed by an otherwise unauthenticated player."""
-    now = datetime.now(UTC)
-    # Keep a recent expired record briefly so the management UI can explain the
-    # outcome, while preventing abandoned enrollment rows from accumulating.
-    for stale in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.claimed_at.is_(None), PlayerEnrollment.expires_at < now - timedelta(days=1))).all():
-        db.delete(stale)
-    existing = db.scalar(select(PlayerEnrollment).where(PlayerEnrollment.device_identifier == payload.device_identifier))
-    if existing and not existing.claimed_at and auth.verify_password(payload.code.upper(), existing.code_hash):
-        if auth.utc_datetime(existing.expires_at) > now:
-            return {"status": "pending", "expires_at": existing.expires_at}
-        db.delete(existing)
-        db.commit()
-        raise HTTPException(status_code=410, detail="Enrollment code has expired; request a replacement.")
-    if existing and not existing.claimed_at:
-        db.delete(existing)
-        # device_identifier is unique; flush the superseded pending record
-        # before inserting its replacement in this same transaction.
-        db.flush()
-    enrollment = PlayerEnrollment(code_hash=auth.hash_password(payload.code.upper()), device_identifier=payload.device_identifier, expires_at=now + timedelta(minutes=15))
-    db.add(enrollment); db.commit()
-    return {"status": "pending", "expires_at": enrollment.expires_at}
-
-
-@router.get("/player-agent/enrollment/{code}")
-def agent_enrollment_status(code: str, db: Session = Depends(get_db)):
-    enrollment = pending_enrollment(code.upper(), db)
-    if not enrollment.claimed_at:
-        return {"status": "pending", "expires_at": enrollment.expires_at}
-    if enrollment.delivered_at or not enrollment.credential_delivery_secret or not enrollment.player_id:
-        return {"status": "claimed"}
-    secret = enrollment.credential_delivery_secret
-    enrollment.credential_delivery_secret = None
-    enrollment.delivered_at = datetime.now(UTC)
-    db.commit()
-    return {"status": "enrolled", "player_id": enrollment.player_id, "device_secret": secret}
-
-
-@router.post("/players/enroll", status_code=201)
-def claim_player_enrollment(payload: EnrollmentClaimInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+@router.post("/players/prepare-enrollment", status_code=201)
+def prepare_player_enrollment(payload: PlayerInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     scope_valid(BUILDING, payload.building_id, db)
     require(user, "manage_players", BUILDING, payload.building_id, db)
-    if payload.layout_id and not db.get(Layout, payload.layout_id):
-        raise HTTPException(status_code=422, detail="Choose a valid layout.")
-    enrollment, state = enrollment_code_state(payload.code, db)
-    if state == "invalid": raise HTTPException(status_code=404, detail="Enrollment code was not found.")
-    if state == "expired": raise HTTPException(status_code=410, detail="Enrollment code has expired.")
-    if state == "used": raise HTTPException(status_code=409, detail="Enrollment code has already been used.")
-    assert enrollment is not None
-    secret = secrets.token_urlsafe(32)
-    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, layout_id=payload.layout_id, enrollment_status="enrolled", device_identifier=enrollment.device_identifier, device_secret_hash=auth.hash_password(secret), health_state="never_connected")
+    if payload.layout_id and not db.get(Layout, payload.layout_id): raise HTTPException(status_code=422, detail="Choose a valid layout.")
+    player = Player(name=payload.name.strip(), building_id=payload.building_id, description=payload.description, enabled=payload.enabled, resolution=payload.resolution, layout_id=payload.layout_id, enrollment_status="pending", health_state="waiting_for_enrollment")
     db.add(player); db.flush()
-    enrollment.player_id, enrollment.claimed_at, enrollment.credential_delivery_secret = player.id, datetime.now(UTC), secret
-    record(db, actor=user, action="player.enrolled", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
+    enrollment = issue_server_enrollment(player, request, user, db, action="player.enrollment_prepared")
     db.commit(); db.refresh(player)
-    return player_data(player)
+    return {"player": player_data(player), "enrollment": enrollment_data(enrollment, include_code=True)}
+
+
+@router.post("/players/{player_id}/enrollment")
+@router.post("/players/{player_id}/enrollment/regenerate")
+def regenerate_player_enrollment(player_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player: raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "manage_players", PLAYER, player.id, db)
+    if player.device_secret_hash: raise HTTPException(status_code=409, detail="Reset this enrolled device before generating a new enrollment code.")
+    enrollment = issue_server_enrollment(player, request, user, db, action="player.enrollment_code_regenerated")
+    db.commit()
+    return {"player": player_data(player), "enrollment": enrollment_data(enrollment, include_code=True)}
+
+
+@router.delete("/players/{player_id}/enrollment", status_code=204)
+def cancel_player_enrollment(player_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player: raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "manage_players", PLAYER, player.id, db)
+    now = datetime.now(UTC)
+    for pending in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.player_id == player.id, PlayerEnrollment.claimed_at.is_(None), PlayerEnrollment.cancelled_at.is_(None))).all():
+        pending.cancelled_at, pending.display_code = now, None
+    player.enrollment_status = "not_enrolled"
+    record(db, actor=user, action="player.enrollment_cancelled", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
+    db.commit()
+
+
+@router.post("/device/enroll", status_code=201)
+def device_enroll(payload: DeviceEnrollmentInput, request: Request, db: Session = Depends(get_db)):
+    auth.check_device_enrollment_rate_limit(f"{auth.client_ip(request) or 'unknown'}:{normal_enrollment_code(payload.code)}")
+    enrollment, state = enrollment_code_state(payload.code, db)
+    if state == "expired": raise HTTPException(status_code=410, detail="That enrollment code has expired. Generate a new code in Signal and enter it here.")
+    if state == "used": raise HTTPException(status_code=409, detail="That enrollment code has already been used.")
+    if state != "valid" or not enrollment or not enrollment.player_id:
+        raise HTTPException(status_code=404, detail="That enrollment code is not valid.")
+    player = db.get(Player, enrollment.player_id)
+    if not player or not player.enabled:
+        raise HTTPException(status_code=409, detail="This prepared display is no longer available.")
+    secret = secrets.token_urlsafe(32)
+    try:
+        enrollment.device_identifier = payload.device_identifier
+        enrollment.claimed_at = datetime.now(UTC)
+        enrollment.display_code = None
+        player.device_identifier = payload.device_identifier
+        player.device_secret_hash = auth.hash_password(secret)
+        player.enrollment_status = "enrolled"
+        player.software_version = payload.software_version
+        player.network_info = {"last_reported_ip": auth.client_ip(request), "platform": payload.platform_metadata or {}}
+        record(db, actor=None, action="player.device_enrolled", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"enrollment_id": enrollment.id, "device_identifier": payload.device_identifier})
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"player_id": player.id, "device_secret": secret, "server_time": datetime.now(UTC)}
+
+
+@router.post("/player-agent/enrollment/start", deprecated=True)
+def retired_player_generated_enrollment():
+    raise HTTPException(status_code=410, detail="Player-generated enrollment codes were retired. Generate a code in Signal and enter it on the player.")
+
+
+@router.get("/player-agent/enrollment/{code}", deprecated=True)
+def retired_player_generated_status(code: str):
+    raise HTTPException(status_code=410, detail="Player-generated enrollment codes were retired.")
+
+
+@router.post("/players/enroll", deprecated=True)
+def retired_admin_claim():
+    raise HTTPException(status_code=410, detail="Prepare the display first, then enter the server-generated code on the player.")
 
 
 @router.post("/players/{player_id}/commands", status_code=201)

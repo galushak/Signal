@@ -76,11 +76,18 @@ class PlayerEnrollment(Timestamped, Base):
     __tablename__ = "player_enrollments"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     code_hash: Mapped[str] = mapped_column(String(255), index=True)
-    device_identifier: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    # The server prepares this record before a physical player exists. The
+    # device identifier is supplied only when that player redeems the code.
+    device_identifier: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     player_id: Mapped[str | None] = mapped_column(ForeignKey("players.id"), nullable=True, index=True)
+    created_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    # Kept only for the pending 15-minute lifecycle so an authorized admin can
+    # revisit/copy the code. Device validation always uses code_hash.
+    display_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
     credential_delivery_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 

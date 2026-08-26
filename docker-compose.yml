@@ -75,7 +75,8 @@ services:
       context: ./pi
     restart: unless-stopped
     environment:
-      SIGNAL_API_URL: http://api:8000/api/v1
+      # Pi contacts Signal through Docker service DNS; it never needs a player IP.
+      SIGNAL_SERVER_URL: ${SIGNAL_SERVER_URL:-http://api:8000}
       SIGNAL_STATE_DIR: /var/lib/signal-player
       SIGNAL_START_CHROMIUM: "true"
     volumes:

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     access_token_minutes: int = 480
     max_upload_bytes: int = 524_288_000
     player_timezone: str = "America/New_York"
+    enrollment_code_ttl_minutes: int = 15
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

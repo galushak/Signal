@@ -17,6 +17,7 @@ settings = get_settings()
 password_hasher = PasswordHash.recommended()
 bearer = HTTPBearer(auto_error=False)
 _attempts: dict[str, list[datetime]] = defaultdict(list)
+_enrollment_attempts: dict[str, list[datetime]] = defaultdict(list)
 _lock = Lock()
 
 
@@ -44,6 +45,17 @@ def check_login_rate_limit(key: str) -> None:
         _attempts[key] = history
         if len(history) >= 8:
             raise HTTPException(status_code=429, detail="Too many sign-in attempts. Please wait 15 minutes and try again.")
+        history.append(now)
+
+
+def check_device_enrollment_rate_limit(key: str) -> None:
+    """Throttle short-code guesses separately from human sign-in attempts."""
+    now = datetime.now(UTC)
+    with _lock:
+        history = [at for at in _enrollment_attempts[key] if now - at < timedelta(minutes=15)]
+        _enrollment_attempts[key] = history
+        if len(history) >= 12:
+            raise HTTPException(status_code=429, detail="Too many enrollment attempts. Please wait 15 minutes and try again.")
         history.append(now)
 
 

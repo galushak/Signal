@@ -4,13 +4,13 @@ import hashlib
 import json
 import logging
 import os
-import secrets
 import shutil
 import tempfile
 import time
+import tomllib
 import uuid
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -30,9 +30,11 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 
 class PlayerAgent:
-    def __init__(self, state_dir: str | Path | None = None, api_url: str | None = None, platform: PlayerPlatform | None = None):
+    def __init__(self, state_dir: str | Path | None = None, api_url: str | None = None, platform: PlayerPlatform | None = None, config_path: str | Path | None = None):
         self.state_dir = Path(state_dir or os.getenv("SIGNAL_STATE_DIR", "/var/lib/signal-player"))
-        self.api_url = (api_url or os.getenv("SIGNAL_API_URL", "http://api:8000/api/v1")).rstrip("/")
+        self.config_path = Path(config_path or os.getenv("SIGNAL_CONFIG_PATH", "/etc/signal-player/config.toml"))
+        configured_url = self._configured_server_url(api_url)
+        self.server_url, self.api_url = self._normalise_server_url(configured_url)
         self.platform = platform or platform_for_environment()
         self.identity_path = self.state_dir / "identity" / "device.json"
         self.manifest_path = self.state_dir / "manifest" / "active.json"
@@ -42,12 +44,30 @@ class PlayerAgent:
         os.chmod(self.state_dir, 0o700)
         self.identity = self._identity()
         self.runtime = self._read_json(self.runtime_path, {"renderer": "starting", "cache": "empty"})
+        if not self.enrolled and self.runtime.get("enrollment_status", "").startswith(("Unable to contact Signal", "getting a new enrollment code")):
+            self.runtime["enrollment_status"] = "Ready to connect."
+            self._save_runtime()
         self.client = httpx.Client(timeout=15)
 
+    def _configured_server_url(self, explicit_url: str | None) -> str:
+        if explicit_url:
+            return explicit_url
+        try:
+            configured = tomllib.loads(self.config_path.read_text()).get("server_url")
+            if isinstance(configured, str) and configured:
+                return configured
+        except (OSError, ValueError, tomllib.TOMLDecodeError):
+            pass
+        return os.getenv("SIGNAL_SERVER_URL") or os.getenv("SIGNAL_API_URL", "http://api:8000")
+
     @staticmethod
-    def enrollment_code() -> str:
-        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        return "".join(secrets.choice(alphabet) for _ in range(6))[:3] + "-" + "".join(secrets.choice(alphabet) for _ in range(6))[3:]
+    def _normalise_server_url(value: str) -> tuple[str, str]:
+        server_url = value.strip().rstrip("/")
+        parsed = urlparse(server_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Signal server must be an http or https URL with a host.")
+        api_url = server_url if server_url.endswith("/api/v1") else f"{server_url}/api/v1"
+        return server_url.removesuffix("/api/v1"), api_url
 
     def _read_json(self, path: Path, default):
         try:
@@ -58,10 +78,25 @@ class PlayerAgent:
     def _identity(self) -> dict:
         identity = self._read_json(self.identity_path, None)
         if identity:
+            # Safe upgrade path: discard only the old, player-generated short
+            # code. Never erase an enrolled device credential or cached media.
+            if not self.enrollment_fields_removed(identity):
+                identity.pop("enrollment_code", None)
+                identity.pop("enrollment_expires_at", None)
+                atomic_write(self.identity_path, json.dumps(identity).encode())
             return identity
-        identity = {"device_identifier": str(uuid.uuid4()), "enrollment_code": self.enrollment_code()}
+        identity = {"device_identifier": str(uuid.uuid4())}
         atomic_write(self.identity_path, json.dumps(identity).encode())
         return identity
+
+    @staticmethod
+    def enrollment_fields_removed(identity: dict) -> bool:
+        return "enrollment_code" not in identity and "enrollment_expires_at" not in identity
+
+    def set_server_url(self, value: str) -> None:
+        server_url, api_url = self._normalise_server_url(value)
+        atomic_write(self.config_path, f'server_url = "{server_url}"\n'.encode())
+        self.server_url, self.api_url = server_url, api_url
 
     def _save_runtime(self) -> None:
         atomic_write(self.runtime_path, json.dumps(self.runtime).encode())
@@ -76,66 +111,49 @@ class PlayerAgent:
     def active_manifest(self) -> dict | None:
         return self._read_json(self.manifest_path, None)
 
-    def enroll(self) -> None:
-        if self.enrolled:
-            return
-        expires_at = self.identity.get("enrollment_expires_at")
-        if expires_at:
-            try:
-                expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-                if expires <= datetime.now(UTC) + timedelta(seconds=10):
-                    self.identity["enrollment_code"] = self.enrollment_code()
-                    self.identity.pop("enrollment_expires_at", None)
-                    atomic_write(self.identity_path, json.dumps(self.identity).encode())
-                    self.runtime["enrollment_status"] = "getting a new enrollment code"
-                    self._save_runtime()
-            except ValueError:
-                self.identity.pop("enrollment_expires_at", None)
-        code = self.identity["enrollment_code"]
-        response = self.client.post(f"{self.api_url}/player-agent/enrollment/start", json={"code": code, "device_identifier": self.identity["device_identifier"]})
-        # An upgraded player may have a code without persisted expiry metadata.
-        # Never revive that stale value: replace it after the authoritative 410.
-        if response.status_code == 410:
-            code = self.enrollment_code()
-            self.identity["enrollment_code"] = code
-            response = self.client.post(f"{self.api_url}/player-agent/enrollment/start", json={"code": code, "device_identifier": self.identity["device_identifier"]})
-        response.raise_for_status()
-        self.identity["enrollment_expires_at"] = response.json()["expires_at"]
-        atomic_write(self.identity_path, json.dumps(self.identity).encode())
-        status = self.client.get(f"{self.api_url}/player-agent/enrollment/{code}")
-        status.raise_for_status()
-        payload = status.json()
-        if payload.get("status") == "enrolled":
-            self.identity.update({"player_id": payload["player_id"], "device_secret": payload["device_secret"]})
-            self.identity.pop("enrollment_code", None)
-            self.identity.pop("enrollment_expires_at", None)
-            atomic_write(self.identity_path, json.dumps(self.identity).encode())
-            self.runtime["enrollment_status"] = "enrolled"
-            self._save_runtime()
-            LOG.info("Player enrollment completed")
-        elif payload.get("status") == "pending":
-            self.runtime["enrollment_status"] = "ready"
-            self._save_runtime()
-
-    def renew_enrollment(self) -> dict:
-        """Replace an unclaimed code on request. The server supersedes the old
-        pending record for this device only after it accepts the new one.
-        """
+    def enroll(self, code: str) -> dict:
+        """Redeem an administrator-generated one-time code outbound to Signal."""
         if self.enrolled:
             return {"status": "enrolled"}
-        previous = self.identity.get("enrollment_code")
-        candidate = self.enrollment_code()
-        self.runtime["enrollment_status"] = "getting a new enrollment code"
+        self.runtime["enrollment_status"] = "Connecting to Signal…"
         self._save_runtime()
-        response = self.client.post(f"{self.api_url}/player-agent/enrollment/start", json={"code": candidate, "device_identifier": self.identity["device_identifier"]})
-        response.raise_for_status()
-        self.identity["enrollment_code"] = candidate
-        self.identity["enrollment_expires_at"] = response.json()["expires_at"]
+        try:
+            response = self.client.post(f"{self.api_url}/device/enroll", json={"code": code.strip().upper(), "device_identifier": self.identity["device_identifier"], "software_version": PLAYER_VERSION, "platform_metadata": self.platform.network_state()})
+        except httpx.RequestError:
+            self.runtime["enrollment_status"] = "Unable to reach Signal. Check the server address and network connection."
+            self._save_runtime()
+            return {"status": "unavailable"}
+        if response.status_code == 410:
+            message = "That enrollment code has expired. Generate a new code in Signal and enter it here."
+        elif response.status_code == 409:
+            message = "That enrollment code has already been used."
+        elif response.status_code in {400, 404, 422}:
+            message = "That enrollment code is not valid."
+        elif response.status_code == 429:
+            message = "Too many attempts. Please wait and try again."
+        elif response.status_code >= 400:
+            message = "Unable to connect this display right now. Please try again."
+        else:
+            payload = response.json()
+            self.identity.update({"player_id": payload["player_id"], "device_secret": payload["device_secret"]})
+            atomic_write(self.identity_path, json.dumps(self.identity).encode())
+            self.runtime["enrollment_status"] = "Display connected. Loading signage…"
+            self.runtime["credential_failures"] = 0
+            self._save_runtime()
+            LOG.info("Player enrollment completed")
+            return {"status": "enrolled"}
+        self.runtime["enrollment_status"] = message
+        self._save_runtime()
+        return {"status": "error", "message": message}
+
+    def reset_enrollment(self) -> None:
+        """Development/admin reset that preserves cache and device identity."""
+        self.identity.pop("player_id", None)
+        self.identity.pop("device_secret", None)
         atomic_write(self.identity_path, json.dumps(self.identity).encode())
-        self.runtime["enrollment_status"] = "ready"
+        self.runtime["enrollment_status"] = "Device needs re-enrollment."
+        self.runtime["credential_failures"] = 0
         self._save_runtime()
-        LOG.info("Renewed unclaimed enrollment code")
-        return {"status": "ready", "code_changed": candidate != previous, "expires_at": self.identity["enrollment_expires_at"]}
 
     def _download_media(self, manifest: dict) -> None:
         self.media_dir.mkdir(parents=True, exist_ok=True)
@@ -161,7 +179,6 @@ class PlayerAgent:
 
     def sync(self) -> bool:
         if not self.enrolled:
-            self.enroll()
             return False
         previous = self.active_manifest()
         headers = self.headers()
@@ -212,8 +229,24 @@ class PlayerAgent:
             self.sync()
             self.heartbeat()
             self.commands()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403} and self.enrolled:
+                failures = int(self.runtime.get("credential_failures", 0)) + 1
+                self.runtime["credential_failures"] = failures
+                if failures >= 3:
+                    self.reset_enrollment()
+                else:
+                    self._save_runtime()
+            LOG.warning("Signal rejected a player request; continuing cached playback: %s", exc)
         except Exception as exc:
-            if not self.enrolled:
-                self.runtime["enrollment_status"] = "Unable to contact Signal. Trying again automatically…"
-                self._save_runtime()
             LOG.warning("Server sync unavailable; continuing cached playback: %s", exc)
+
+
+if __name__ == "__main__":
+    import sys
+
+    if sys.argv[1:] == ["reset-enrollment"]:
+        PlayerAgent().reset_enrollment()
+        print("Enrollment credentials reset; cached signage was preserved.")
+    else:
+        raise SystemExit("Usage: python -m app.agent reset-enrollment")

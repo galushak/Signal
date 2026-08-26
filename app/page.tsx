@@ -825,7 +825,11 @@ function PlayersView({
                 >
                   {player.health_state === "never_connected"
                     ? "Never connected"
-                    : player.health_state}
+                    : player.health_state === "waiting_for_enrollment"
+                      ? "Waiting for enrollment"
+                      : player.health_state === "not_enrolled"
+                        ? "Not enrolled"
+                        : player.health_state}
                 </span>
                 <span>{player.cache_state}</span>
               </div>
@@ -839,9 +843,8 @@ function PlayersView({
         <EnrollmentDialog
           token={token}
           onClose={() => setShowEnrollment(false)}
-          onEnrolled={(name) => {
-            setShowEnrollment(false);
-            notify(`${name} enrolled successfully.`);
+          onPrepared={(name) => {
+            notify(`${name} is waiting for its enrollment code.`);
             reload();
           }}
         />
@@ -851,6 +854,192 @@ function PlayersView({
 }
 
 function EnrollmentDialog({
+  token,
+  onClose,
+  onPrepared,
+}: {
+  token: string;
+  onClose: () => void;
+  onPrepared: (name: string) => void;
+}) {
+  const [options, setOptions] = useState<{
+    buildings: Building[];
+    layouts: Layout[];
+  }>({ buildings: [], layouts: [] });
+  const [prepared, setPrepared] = useState<{
+    player: Player;
+    enrollment: { code: string; expires_at: string };
+  } | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    request("/player-enrollments/options", token)
+      .then(setOptions)
+      .catch((reason) => setError(reason.message));
+  }, [token]);
+
+  const prepare = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request("/players/prepare-enrollment", token, {
+        method: "POST",
+        body: JSON.stringify({
+          name: form.get("name"),
+          building_id: form.get("building_id"),
+          layout_id: form.get("layout_id") || null,
+          description: form.get("description") || null,
+          enabled: true,
+        }),
+      });
+      setPrepared(result);
+      onPrepared(result.player.name);
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to prepare this display.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const regenerate = async () => {
+    if (!prepared) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request(
+        `/players/${prepared.player.id}/enrollment/regenerate`,
+        token,
+        { method: "POST" },
+      );
+      setPrepared(result);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to regenerate code.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancel = async () => {
+    if (!prepared) return onClose();
+    setBusy(true);
+    try {
+      await request(`/players/${prepared.player.id}/enrollment`, token, {
+        method: "DELETE",
+      });
+      onClose();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to cancel enrollment.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="enrollment-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="enroll-title"
+      >
+        <header>
+          <div>
+            <p className="eyebrow">DISPLAYS</p>
+            <h2 id="enroll-title">Prepare Display</h2>
+          </div>
+          <button className="close" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </header>
+        {!prepared ? (
+          <form onSubmit={prepare}>
+            <label>
+              Display name
+              <input name="name" placeholder="TEST PI" required autoFocus />
+            </label>
+            <label>
+              Building
+              <select name="building_id" required defaultValue="">
+                <option value="" disabled>
+                  Choose building
+                </option>
+                {options.buildings.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Layout <small>(recommended)</small>
+              <select name="layout_id" defaultValue="">
+                <option value="">Assign later</option>
+                {options.layouts.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Location <small>(optional)</small>
+              <input name="description" placeholder="Serving line" />
+            </label>
+            {error && <p className="enrollment-error">{error}</p>}
+            <footer>
+              <button type="button" className="secondary-button" onClick={onClose}>
+                Cancel
+              </button>
+              <button className="primary" disabled={busy || !options.buildings.length}>
+                {busy ? "Generating…" : "Generate Enrollment Code"}
+              </button>
+            </footer>
+          </form>
+        ) : (
+          <div className="prepared-enrollment">
+            <p>Enter this code on the Pi. Signal never needs the Pi’s IP address.</p>
+            <div className="enrollment-code">
+              <b>{prepared.enrollment.code}</b>
+            </div>
+            <p>
+              Expires at{" "}
+              {new Date(prepared.enrollment.expires_at).toLocaleTimeString([], {
+                hour: "numeric",
+                minute: "2-digit",
+              })}
+            </p>
+            {error && <p className="enrollment-error">{error}</p>}
+            <footer>
+              <button
+                className="secondary-button"
+                onClick={() => navigator.clipboard?.writeText(prepared.enrollment.code)}
+              >
+                Copy Code
+              </button>
+              <button className="secondary-button" onClick={regenerate} disabled={busy}>
+                Regenerate Code
+              </button>
+              <button className="primary" onClick={cancel} disabled={busy}>
+                Cancel Enrollment
+              </button>
+            </footer>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function LegacyEnrollmentDialog({
   token,
   onClose,
   onEnrolled,
