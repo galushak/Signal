@@ -1894,6 +1894,8 @@ small,
   height: 100%;
   object-fit: contain;
 }
+.player-preview-stage img.thumbnail-cover { object-fit: cover; }
+.player-preview-stage img.thumbnail-contain { object-fit: contain; }
 .player-preview-stage .thumbnail-fallback {
   color: #d9d2f4;
 }
@@ -1924,6 +1926,16 @@ small,
 .picker-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .picker-thumb .thumbnail-fallback { padding: 3px; text-align: center; font-size: 8px; }
 .building-line { grid-template-columns: minmax(0, 1fr) auto auto; gap: 14px; }
+.building-card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,320px)); gap:16px; }
+.building-card { min-height:150px; padding:18px; border:1px solid var(--line); border-radius:12px; background:#fff; box-shadow:0 8px 24px #28385a0c; display:flex; flex-direction:column; }
+.building-card b,.building-card small { display:block; }
+.building-card small,.building-card p { color:#718098; font-size:12px; margin:5px 0 0; }
+.building-card p { flex:1; line-height:1.4; }
+.building-card footer { display:flex; align-items:center; gap:12px; }
+.placeholder-player { margin:0 0 16px; color:#718098; font-size:12px; }
+.placeholder-player summary { cursor:pointer; width:max-content; }
+.placeholder-player form { margin-top:10px; }
+.modal-action-list { padding:0 20px 20px; display:grid; gap:10px; }
 .assignment-main {
   min-width: 0;
 }

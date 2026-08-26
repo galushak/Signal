@@ -15,7 +15,7 @@ from .audit import record
 from .authorization import BUILDING, DISTRICT, PLAYER, ZONE, allowed, require, visible_building_ids, visible_player_ids
 from .database import get_db
 from .models import AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, PlayerCommand, PlayerEnrollment, Tag, User, Zone
-from .player_protocol import MANIFEST_SCHEMA, build_manifest, media_is_allowed
+from .player_protocol import MANIFEST_SCHEMA, _asset_ids, build_manifest, media_is_allowed
 from .settings import get_settings
 from .worker import prepare_media
 
@@ -150,6 +150,7 @@ class AssignmentInput(BaseModel):
     priority: int = Field(default=1, ge=1, le=3)
     duration_seconds: int | None = Field(default=None, ge=1, le=3600)
     transition: str | None = None
+    display_mode: str = "fit"
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     weekdays: list[int] | None = None
@@ -161,6 +162,14 @@ class AssignmentReorderInput(BaseModel):
     destination_type: str
     destination_id: str
     assignment_ids: list[str] = Field(min_length=1)
+
+
+class TrashInput(BaseModel):
+    remove_assignments: bool = False
+
+
+class PermanentDeleteInput(BaseModel):
+    confirmation: str
 
 
 class TemplateInput(BaseModel):
@@ -779,12 +788,44 @@ def player_command_result(command_id: str, payload: CommandResultInput, request:
     return {"ok": True}
 
 
+def media_design_references(asset_id: str, db: Session) -> list[Content]:
+    """Active designs are the source of truth: never orphan their asset refs."""
+    matches = []
+    for content in db.scalars(select(Content).where(Content.trashed_at.is_(None))):
+        versions = db.scalars(select(ContentVersion).where(ContentVersion.content_id == content.id)).all()
+        if any(asset_id in _asset_ids(version.design_document or {}) for version in versions):
+            matches.append(content)
+    return matches
+
+
+def remove_source_assignments(source_column: str, source_id: str, request: Request, user: User, db: Session) -> int:
+    column = ContentAssignment.content_id if source_column == "content" else ContentAssignment.media_asset_id
+    assignments = db.scalars(select(ContentAssignment).where(column == source_id)).all()
+    destinations = {(assignment.destination_type, assignment.destination_id) for assignment in assignments}
+    for assignment in assignments:
+        record(db, actor=user, action="assignment.removed_for_trash", resource_type="assignment", resource_id=assignment.id, resource_name=source_id, scope_type=assignment.destination_type, scope_id=assignment.destination_id, source_ip=auth.client_ip(request))
+        db.delete(assignment)
+    db.flush()
+    for destination in destinations:
+        refresh_desired_state(*destination, db)
+    return len(assignments)
+
+
 @router.post("/media/{asset_id}/trash")
-def trash_media(asset_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+def trash_media(asset_id: str, payload: TrashInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     asset = db.get(MediaAsset, asset_id)
     if not asset: raise HTTPException(status_code=404, detail="Media not found.")
-    require(user, "trash_content", asset.scope_type, asset.scope_id, db); asset.trashed_at = datetime.now(UTC)
-    record(db, actor=user, action="media.trashed", resource_type="media", resource_id=asset.id, resource_name=asset.display_name, scope_type=asset.scope_type, scope_id=asset.scope_id, source_ip=auth.client_ip(request)); db.commit(); return {"ok": True}
+    require(user, "trash_content", asset.scope_type, asset.scope_id, db)
+    references = media_design_references(asset.id, db)
+    if references:
+        raise HTTPException(status_code=409, detail=f"This {asset.media_type} is used by {len(references)} Design{'s' if len(references) != 1 else ''}. Replace or remove it from those Designs before moving it to Trash.")
+    assignment_count = int(db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.media_asset_id == asset.id)) or 0)
+    if assignment_count and not payload.remove_assignments:
+        raise HTTPException(status_code=409, detail={"message": f"{asset.display_name} is currently assigned to {assignment_count} display{'s' if assignment_count != 1 else ''}. Moving it to Trash will remove it from those displays.", "assignment_count": assignment_count, "requires_assignment_removal": True})
+    removed = remove_source_assignments("media", asset.id, request, user, db) if assignment_count else 0
+    asset.trashed_at = datetime.now(UTC)
+    record(db, actor=user, action="media.trashed", resource_type="media", resource_id=asset.id, resource_name=asset.display_name, scope_type=asset.scope_type, scope_id=asset.scope_id, source_ip=auth.client_ip(request), metadata={"assignments_removed": removed})
+    db.commit(); return {"ok": True, "assignments_removed": removed}
 
 
 @router.post("/media/{asset_id}/restore")
@@ -793,6 +834,20 @@ def restore_media(asset_id: str, request: Request, user: User = Depends(auth.get
     if not asset: raise HTTPException(status_code=404, detail="Media not found.")
     require(user, "manage_media", asset.scope_type, asset.scope_id, db); asset.trashed_at = None
     record(db, actor=user, action="media.restored", resource_type="media", resource_id=asset.id, resource_name=asset.display_name, scope_type=asset.scope_type, scope_id=asset.scope_id, source_ip=auth.client_ip(request)); db.commit(); return {"ok": True}
+
+
+@router.delete("/media/{asset_id}")
+def permanently_delete_media(asset_id: str, payload: PermanentDeleteInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    asset = db.get(MediaAsset, asset_id)
+    if not asset: raise HTTPException(status_code=404, detail="Media not found.")
+    require(user, "manage_media", asset.scope_type, asset.scope_id, db)
+    if not asset.trashed_at: raise HTTPException(status_code=409, detail="Move this item to Trash before permanently deleting it.")
+    if payload.confirmation != "DELETE": raise HTTPException(status_code=422, detail="Type DELETE to permanently delete this item.")
+    if media_design_references(asset.id, db): raise HTTPException(status_code=409, detail="This media is still used by an active Design and cannot be permanently deleted.")
+    paths = [settings.media_root / value for value in (asset.original_path, asset.processed_path, asset.thumbnail_path) if value]
+    record(db, actor=user, action="media.permanently_deleted", resource_type="media", resource_id=asset.id, resource_name=asset.display_name, scope_type=asset.scope_type, scope_id=asset.scope_id, source_ip=auth.client_ip(request)); db.delete(asset); db.commit()
+    for path in paths: path.unlink(missing_ok=True)
+    return {"ok": True}
 
 
 @router.get("/audit")
@@ -855,7 +910,7 @@ def version_data(version: ContentVersion | None) -> dict | None:
 
 
 def assignment_data(item: ContentAssignment, db: Session | None = None) -> dict:
-    data = {"id": item.id, "content_id": item.content_id, "media_asset_id": item.media_asset_id, "source_type": item.source_type, "destination_type": item.destination_type, "destination_id": item.destination_id, "enabled": item.enabled, "priority": item.priority, "position": item.position, "duration_seconds": item.duration_seconds, "transition": item.transition, "starts_at": item.starts_at, "ends_at": item.ends_at, "weekdays": item.weekdays, "daily_start": item.daily_start, "daily_end": item.daily_end, "created_at": item.created_at, "updated_at": item.updated_at}
+    data = {"id": item.id, "content_id": item.content_id, "media_asset_id": item.media_asset_id, "source_type": item.source_type, "destination_type": item.destination_type, "destination_id": item.destination_id, "enabled": item.enabled, "priority": item.priority, "position": item.position, "duration_seconds": item.duration_seconds, "transition": item.transition, "display_mode": item.display_mode, "starts_at": item.starts_at, "ends_at": item.ends_at, "weekdays": item.weekdays, "daily_start": item.daily_start, "daily_end": item.daily_end, "created_at": item.created_at, "updated_at": item.updated_at}
     if db is None:
         return data
     if item.source_type == "media" and item.media_asset_id:
@@ -1009,6 +1064,39 @@ def content_for_user(content_id: str, capability: str, user: User, db: Session) 
     require(user, capability, item.scope_type, item.scope_id, db); return item
 
 
+@router.post("/content/{content_id}/trash")
+def trash_content(content_id: str, payload: TrashInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = db.get(Content, content_id)
+    if not item: raise HTTPException(status_code=404, detail="Content not found.")
+    require(user, "trash_content", item.scope_type, item.scope_id, db)
+    assignment_count = int(db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.content_id == item.id)) or 0)
+    if assignment_count and not payload.remove_assignments:
+        raise HTTPException(status_code=409, detail={"message": f"{item.name} is currently assigned to {assignment_count} display{'s' if assignment_count != 1 else ''}. Moving it to Trash will remove it from those displays.", "assignment_count": assignment_count, "requires_assignment_removal": True})
+    removed = remove_source_assignments("content", item.id, request, user, db) if assignment_count else 0
+    item.trashed_at = datetime.now(UTC)
+    record(db, actor=user, action="content.trashed", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"assignments_removed": removed})
+    db.commit(); return {"ok": True, "assignments_removed": removed}
+
+
+@router.post("/content/{content_id}/untrash")
+def untrash_content(content_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = db.get(Content, content_id)
+    if not item: raise HTTPException(status_code=404, detail="Content not found.")
+    require(user, "trash_content", item.scope_type, item.scope_id, db)
+    item.trashed_at = None
+    record(db, actor=user, action="content.untrashed", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request)); db.commit(); return {"ok": True}
+
+
+@router.delete("/content/{content_id}")
+def permanently_delete_content(content_id: str, payload: PermanentDeleteInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    item = db.get(Content, content_id)
+    if not item: raise HTTPException(status_code=404, detail="Content not found.")
+    require(user, "manage_media", item.scope_type, item.scope_id, db)
+    if not item.trashed_at: raise HTTPException(status_code=409, detail="Move this item to Trash before permanently deleting it.")
+    if payload.confirmation != "DELETE": raise HTTPException(status_code=422, detail="Type DELETE to permanently delete this item.")
+    record(db, actor=user, action="content.permanently_deleted", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request)); db.delete(item); db.commit(); return {"ok": True}
+
+
 @router.get("/content")
 def list_content(include_trashed: bool = False, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     query = select(Content).order_by(Content.updated_at.desc())
@@ -1052,22 +1140,24 @@ def content_thumbnail(content_id: str, user: User = Depends(auth.get_current_use
 
 @router.get("/library")
 def unified_library(kind: str = "all", search: str | None = None, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    if kind not in {"all", "design", "image", "video", "pdf"}:
-        raise HTTPException(status_code=422, detail="Choose All, Designs, Images, Videos, or PDFs.")
+    if kind not in {"all", "design", "image", "video", "pdf", "trash"}:
+        raise HTTPException(status_code=422, detail="Choose All, Designs, Images, Videos, PDFs, or Trash.")
     needle = (search or "").strip().lower()
     items = []
-    if kind in {"all", "design"}:
-        for content in db.scalars(select(Content).where(Content.trashed_at.is_(None)).order_by(Content.updated_at.desc())):
+    if kind in {"all", "design", "trash"}:
+        content_query = select(Content).where(Content.trashed_at.is_not(None) if kind == "trash" else Content.trashed_at.is_(None)).order_by(Content.updated_at.desc())
+        for content in db.scalars(content_query):
             if not allowed(user, "view", content.scope_type, content.scope_id, db) or needle and needle not in content.name.lower():
                 continue
             data = content_data(content, db)
-            items.append({"id": content.id, "kind": "design", "name": content.name, "status": "Published" if data["published_version"] else "Draft", "updated_at": content.updated_at, "thumbnail_url": f"/api/v1/content/{content.id}/thumbnail.svg", "scope_type": content.scope_type, "scope_id": content.scope_id})
-    if kind in {"all", "image", "video", "pdf"}:
-        for asset in db.scalars(select(MediaAsset).where(MediaAsset.trashed_at.is_(None)).order_by(MediaAsset.created_at.desc())):
+            items.append({"id": content.id, "kind": "design", "name": content.name, "status": "Trashed" if content.trashed_at else ("Published" if data["published_version"] else "Draft"), "trashed": bool(content.trashed_at), "updated_at": content.updated_at, "thumbnail_url": f"/api/v1/content/{content.id}/thumbnail.svg", "scope_type": content.scope_type, "scope_id": content.scope_id})
+    if kind in {"all", "image", "video", "pdf", "trash"}:
+        asset_query = select(MediaAsset).where(MediaAsset.trashed_at.is_not(None) if kind == "trash" else MediaAsset.trashed_at.is_(None)).order_by(MediaAsset.created_at.desc())
+        for asset in db.scalars(asset_query):
             tags = db.scalars(select(Tag.name).join(MediaAssetTag, Tag.id == MediaAssetTag.tag_id).where(MediaAssetTag.asset_id == asset.id)).all()
-            if not allowed(user, "view", asset.scope_type, asset.scope_id, db) or kind != "all" and asset.media_type != kind or needle and needle not in asset.display_name.lower() and needle not in tags:
+            if not allowed(user, "view", asset.scope_type, asset.scope_id, db) or kind not in {"all", "trash"} and asset.media_type != kind or needle and needle not in asset.display_name.lower() and needle not in tags:
                 continue
-            items.append({"id": asset.id, "kind": asset.media_type, "name": asset.display_name, "status": asset.processing_state, "updated_at": asset.updated_at, "thumbnail_url": f"/api/v1/media/{asset.id}/thumbnail" if asset.thumbnail_path else None, "scope_type": asset.scope_type, "scope_id": asset.scope_id, "tags": tags})
+            items.append({"id": asset.id, "kind": asset.media_type, "name": asset.display_name, "status": "Trashed" if asset.trashed_at else asset.processing_state, "trashed": bool(asset.trashed_at), "updated_at": asset.updated_at, "thumbnail_url": f"/api/v1/media/{asset.id}/thumbnail" if asset.thumbnail_path else None, "scope_type": asset.scope_type, "scope_id": asset.scope_id, "tags": tags})
     return sorted(items, key=lambda item: item["updated_at"] or datetime.min.replace(tzinfo=UTC), reverse=True)
 
 
@@ -1116,6 +1206,7 @@ def create_assignment(content_id: str, payload: AssignmentInput, request: Reques
         raise HTTPException(status_code=409, detail="Publish this design before sending it to a display.")
     if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
     if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
+    if payload.display_mode not in {"fit", "fill"}: raise HTTPException(status_code=422, detail="Choose Fit to Display or Fill Display.")
     if payload.weekdays and any(day not in range(7) for day in payload.weekdays): raise HTTPException(status_code=422, detail="Weekdays must be numbers from 0 (Monday) to 6 (Sunday).")
     max_position = db.scalar(select(func.max(ContentAssignment.position)).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id))
     position = max_position + 1 if max_position is not None else 0
@@ -1131,6 +1222,7 @@ def create_media_assignment(asset_id: str, payload: AssignmentInput, request: Re
     scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
     if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
     if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
+    if payload.display_mode not in {"fit", "fill"}: raise HTTPException(status_code=422, detail="Choose Fit to Display or Fill Display.")
     max_position = db.scalar(select(func.max(ContentAssignment.position)).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id))
     position = max_position + 1 if max_position is not None else 0
     assignment = ContentAssignment(media_asset_id=asset.id, source_type="media", position=position, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); refresh_desired_state(payload.destination_type, payload.destination_id, db); record(db, actor=user, action="assignment.sent_to_display", resource_type="assignment", resource_id=assignment.id, resource_name=asset.display_name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"source_type": asset.media_type, "position": position}); db.commit(); return assignment_data(assignment, db)
@@ -1149,6 +1241,7 @@ def update_assignment(assignment_id: str, payload: AssignmentInput, request: Req
     _, source_name = assignment_source(assignment, user, db); require(user, "schedule", assignment.destination_type, assignment.destination_id, db); scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
     if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
     if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
+    if payload.display_mode not in {"fit", "fill"}: raise HTTPException(status_code=422, detail="Choose Fit to Display or Fill Display.")
     previous_destination = (assignment.destination_type, assignment.destination_id)
     for key, value in payload.model_dump().items(): setattr(assignment, key, value)
     refresh_desired_state(*previous_destination, db); refresh_desired_state(assignment.destination_type, assignment.destination_id, db)

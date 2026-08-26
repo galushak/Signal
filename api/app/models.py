@@ -232,6 +232,7 @@ class ContentAssignment(Timestamped, Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     transition: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    display_mode: Mapped[str] = mapped_column(String(16), default="fit")
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     weekdays: Mapped[list | None] = mapped_column(JSON, nullable=True)

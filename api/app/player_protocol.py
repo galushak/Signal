@@ -56,6 +56,7 @@ def _assignment_data(item: ContentAssignment) -> dict:
         "position": item.position,
         "durationSeconds": item.duration_seconds or 20,
         "transition": item.transition or "none",
+        "displayMode": item.display_mode or "fit",
         "startsAt": item.starts_at.isoformat() if item.starts_at else None,
         "endsAt": item.ends_at.isoformat() if item.ends_at else None,
         "weekdays": item.weekdays,
@@ -93,7 +94,7 @@ def build_manifest(player: Player, db: Session) -> dict:
             content_items.append({
                 "id": assignment.id,
                 "name": asset.display_name,
-                "source": {"type": asset.media_type, "assetId": asset.id, "fit": "contain"},
+                "source": {"type": asset.media_type, "assetId": asset.id},
                 "assignment": assignment_payload,
             })
             continue

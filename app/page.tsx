@@ -114,6 +114,7 @@ type LibraryItem = {
   updated_at: string;
   thumbnail_url?: string;
   tags?: string[];
+  trashed?: boolean;
 };
 type Dashboard = {
   players_total: number;
@@ -123,7 +124,7 @@ type Dashboard = {
   warnings: { player: Player }[];
 };
 
-function AuthenticatedThumbnail({ thumbnailUrl, token, label, alt }: { thumbnailUrl?: string; token: string; label: string; alt: string }) {
+function AuthenticatedThumbnail({ thumbnailUrl, token, label, alt, fit = "cover" }: { thumbnailUrl?: string; token: string; label: string; alt: string; fit?: "contain" | "cover" }) {
   const [source, setSource] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -139,7 +140,7 @@ function AuthenticatedThumbnail({ thumbnailUrl, token, label, alt }: { thumbnail
       .catch(() => { if (live) setFailed(true); });
     return () => { live = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [thumbnailUrl, token]);
-  return source && !failed ? <img src={source} alt={alt} onError={() => setFailed(true)} /> : <span className="thumbnail-fallback">{thumbnailUrl && !failed ? "Generating preview…" : label}</span>;
+  return source && !failed ? <img className={`thumbnail-${fit}`} src={source} alt={alt} onError={() => setFailed(true)} /> : <span className="thumbnail-fallback">{thumbnailUrl && !failed ? "Generating preview…" : label}</span>;
 }
 
 function LibraryThumbnail({ item, token }: { item: LibraryItem; token: string }) {
@@ -227,7 +228,7 @@ async function request(
   const body =
     response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok)
-    throw new Error(body?.detail || "Something went wrong. Please try again.");
+    throw new Error(typeof body?.detail === "string" ? body.detail : body?.detail?.message || "Something went wrong. Please try again.");
   return body;
 }
 
@@ -610,6 +611,8 @@ function MediaView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [sendItem, setSendItem] = useState<LibraryItem | null>(null);
+  const [trashItem, setTrashItem] = useState<LibraryItem | null>(null);
+  const [deleteItem, setDeleteItem] = useState<LibraryItem | null>(null);
   const reload = useCallback(
     () =>
       Promise.all([
@@ -706,7 +709,7 @@ function MediaView({
           placeholder="Search designs, files, and tags"
         />
         <div className="button-row">
-          {["all", "design", "image", "video", "pdf"].map((item) => (
+          {["all", "design", "image", "video", "pdf", "trash"].map((item) => (
             <button
               key={item}
               className={kind === item ? "primary" : "secondary-button"}
@@ -716,7 +719,7 @@ function MediaView({
                 ? "All"
                 : item === "design"
                   ? "Designs"
-                  : `${item[0].toUpperCase()}${item.slice(1)}s`}
+                  : item === "trash" ? "Trash" : `${item[0].toUpperCase()}${item.slice(1)}s`}
             </button>
           ))}
         </div>
@@ -736,7 +739,7 @@ function MediaView({
                     ? `Design · ${asset.status}`
                     : `${asset.kind} · ${asset.status}`}
                 </small>
-                {asset.kind === "design" && (
+                {asset.kind === "design" && !asset.trashed && (
                   <button
                     className="secondary-button"
                     onClick={() => onOpenDesign(asset.id)}
@@ -744,9 +747,8 @@ function MediaView({
                     Open in Designer
                   </button>
                 )}
-                <button className="primary" onClick={() => setSendItem(asset)}>
-                  Send to Display
-                </button>
+                {!asset.trashed && <button className="primary" onClick={() => setSendItem(asset)}>Send to Display</button>}
+                {asset.trashed ? <div className="button-row"><button className="secondary-button" onClick={async () => { try { await request(asset.kind === "design" ? `/content/${asset.id}/untrash` : `/media/${asset.id}/restore`, token, { method: "POST" }); notify(`“${asset.name}” was restored.`); reload(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to restore item."); } }}>Restore</button><button className="card-text-action danger" onClick={() => setDeleteItem(asset)}>Permanently Delete</button></div> : <button className="card-text-action" onClick={() => setTrashItem(asset)}>⋯ More</button>}
               </article>
             ))
           ) : (
@@ -765,8 +767,22 @@ function MediaView({
           }}
         />
       )}
+      {trashItem && <TrashLibraryDialog item={trashItem} token={token} onClose={() => setTrashItem(null)} onDone={(message) => { notify(message); setTrashItem(null); reload(); }} />}
+      {deleteItem && <PermanentDeleteDialog item={deleteItem} token={token} onClose={() => setDeleteItem(null)} onDone={() => { notify(`“${deleteItem.name}” was permanently deleted.`); setDeleteItem(null); reload(); }} />}
     </>
   );
+}
+
+function TrashLibraryDialog({ item, token, onClose, onDone }: { item: LibraryItem; token: string; onClose: () => void; onDone: (message: string) => void }) {
+  const [requiresRemoval, setRequiresRemoval] = useState(false); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const trash = async () => { setBusy(true); try { await request(item.kind === "design" ? `/content/${item.id}/trash` : `/media/${item.id}/trash`, token, { method: "POST", body: JSON.stringify({ remove_assignments: requiresRemoval }) }); onDone(`“${item.name}” moved to Trash${requiresRemoval ? " and was removed from its displays" : ""}.`); } catch (reason) { const message = reason instanceof Error ? reason.message : "Unable to move this item to Trash."; if (message.includes("currently assigned")) setRequiresRemoval(true); setError(message); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="trash-title"><header><div><p className="eyebrow">MOVE TO TRASH</p><h2 id="trash-title">Move “{item.name}” to Trash?</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="remove-player-copy"><p>{requiresRemoval ? "This item is assigned to one or more displays. Continue to remove those assignments and move it to Trash." : "You can restore this item later from Library → Trash."}</p>{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="danger-button" onClick={trash} disabled={busy}>{busy ? "Moving…" : requiresRemoval ? "Remove from Displays and Trash" : "Move to Trash"}</button></footer></section></div>;
+}
+
+function PermanentDeleteDialog({ item, token, onClose, onDone }: { item: LibraryItem; token: string; onClose: () => void; onDone: () => void }) {
+  const [value, setValue] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const remove = async () => { setBusy(true); try { await request(item.kind === "design" ? `/content/${item.id}` : `/media/${item.id}`, token, { method: "DELETE", body: JSON.stringify({ confirmation: value }) }); onDone(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to permanently delete item."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="permanent-delete-title"><header><div><p className="eyebrow">PERMANENT DELETE</p><h2 id="permanent-delete-title">Permanently delete “{item.name}”?</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="remove-player-copy"><p>This cannot be undone. Type <b>DELETE</b> to continue.</p><input aria-label="Type DELETE to confirm" value={value} onChange={(event) => setValue(event.target.value)} />{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="danger-button" onClick={remove} disabled={busy || value !== "DELETE"}>{busy ? "Deleting…" : "Permanently Delete"}</button></footer></section></div>;
 }
 
 function SendToDisplayDialog({
@@ -818,6 +834,7 @@ function SendToDisplayDialog({
             duration_seconds: Number(form.get("duration_seconds") || 20),
             transition: form.get("transition"),
             priority: Number(form.get("priority")),
+            display_mode: form.get("display_mode") || "fit",
             enabled: form.get("enabled") === "on",
             starts_at: form.get("start_mode") === "schedule" ? form.get("starts_at") || null : null,
             ends_at: form.get("expire") === "yes" ? form.get("ends_at") || null : null,
@@ -851,6 +868,7 @@ function SendToDisplayDialog({
             <label>Transition<select name="transition" defaultValue="fade"><option value="fade">Fade</option><option value="none">None</option><option value="slide">Slide</option></select></label>
             <label>Priority<select name="priority" defaultValue="1"><option value="1">Normal</option><option value="2">Elevated</option><option value="3">High</option></select></label>
           </div>
+          {item.kind !== "design" && <label>Display Mode<select name="display_mode" defaultValue="fit"><option value="fit">Fit to Display</option><option value="fill">Fill Display</option></select><small>Fit shows the entire item. Fill may crop edges.</small></label>}
           <label className="checkbox-label"><input name="enabled" type="checkbox" defaultChecked />Enabled</label>
           <fieldset className="send-schedule"><legend>When</legend><label className="radio-label"><input name="start_mode" type="radio" value="now" defaultChecked />Start now</label><label className="radio-label"><input name="start_mode" type="radio" value="schedule" />Schedule</label><input name="starts_at" type="datetime-local" aria-label="Start date and time" /></fieldset>
           <fieldset className="send-schedule"><legend>Expiration</legend><label className="radio-label"><input name="expire" type="radio" value="no" defaultChecked />No expiration</label><label className="radio-label"><input name="expire" type="radio" value="yes" />Expire</label><input name="ends_at" type="datetime-local" aria-label="Expiration date and time" /></fieldset>
@@ -874,6 +892,7 @@ type PlayerAssignment = {
   priority: number;
   duration_seconds?: number | null;
   transition?: string | null;
+  display_mode?: "fit" | "fill";
   starts_at?: string | null;
   ends_at?: string | null;
   weekdays?: number[] | null;
@@ -986,9 +1005,9 @@ function PlayerDetailsView({
               <article className={`assigned-content ${assignment.enabled ? "" : "disabled"}`} key={assignment.id} draggable onDragStart={() => setDragging(assignment.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => reorder(group.type, group.id, assignment.id)}>
                 <span className="drag-handle" aria-label="Drag to reorder">☰</span>
                 <div className="assignment-thumb"><AuthenticatedThumbnail thumbnailUrl={assignment.source?.thumbnail_url || undefined} token={token} label={assignment.source?.type === "video" ? "▶" : assignment.source?.type === "pdf" ? "PDF" : assignment.source?.type === "image" ? "IMG" : "DESIGN"} alt={`Preview of ${assignment.source?.name || "content"}`} /></div>
-                <div className="assignment-main"><b>{assignment.source?.name || "Unavailable content"}</b><small>{assignment.source?.type || assignment.source_type} · {assignment.duration_seconds || 20} sec · {assignment.transition || "None"}{assignment.starts_at ? ` · Starts ${new Date(assignment.starts_at).toLocaleString()}` : ""}{assignment.ends_at ? ` · Expires ${new Date(assignment.ends_at).toLocaleString()}` : ""}</small></div>
+                <div className="assignment-main"><b>{assignment.source?.name || "Unavailable content"}</b><small>{assignment.source?.type || assignment.source_type} · {assignment.duration_seconds || 20} sec · {assignment.display_mode === "fill" ? "Fill Display" : "Fit to Display"}{assignment.starts_at ? ` · Starts ${new Date(assignment.starts_at).toLocaleString()}` : ""}{assignment.ends_at ? ` · Expires ${new Date(assignment.ends_at).toLocaleString()}` : ""}</small></div>
                 <span className={assignment.enabled ? "state published" : "state draft"}>{assignment.enabled ? "Active" : "Disabled"}</span>
-                <div className="assignment-actions"><button className="secondary-button" onClick={() => setEditing(assignment)}>Edit Playback</button><button className="card-text-action" onClick={() => setRemoving(assignment)}>Remove</button></div>
+                <div className="assignment-actions"><button className="secondary-button" onClick={() => setEditing(assignment)}>Edit Playback</button><button className="card-text-action" title="More actions" aria-label={`More actions for ${assignment.source?.name || "content"}`} onClick={() => setRemoving(assignment)}>⋯</button></div>
               </article>
             ))}
           </section>
@@ -1012,7 +1031,7 @@ function PlayerPreviewDialog({ playerId, token, onClose }: { playerId: string; t
   const item = items[index];
   const source = item?.assignment?.source;
   const label = source?.type === "video" ? "▶ VIDEO" : source?.type === "pdf" ? "PDF" : source?.type === "image" ? "IMAGE" : "DESIGN";
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal player-preview-modal" role="dialog" aria-modal="true" aria-labelledby="player-preview-title"><header><div><p className="eyebrow">EXPECTED PLAYER OUTPUT</p><h2 id="player-preview-title">{data?.player?.name || "Display"} Preview</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header>{error ? <p className="enrollment-error">{error}</p> : !data ? <Loading /> : !item ? <Empty text="No currently eligible content is assigned to this display." /> : <><div className="player-preview-stage"><AuthenticatedThumbnail thumbnailUrl={source?.thumbnail_url} token={token} label={label} alt={`Expected output: ${source?.name || "content"}`} /></div><div className="player-preview-caption"><div><b>{source?.name || item.content?.name || item.media?.name}</b><small>{source?.type || item.media?.type || "design"} · {item.assignment.duration_seconds || 20} sec · Full Screen / Main</small></div>{items.length > 1 && <div className="button-row"><button className="secondary-button" onClick={() => setIndex((index + items.length - 1) % items.length)}>Previous</button><span>{index + 1} / {items.length}</span><button className="secondary-button" onClick={() => setIndex((index + 1) % items.length)}>Next</button></div>}</div></>}</section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal player-preview-modal" role="dialog" aria-modal="true" aria-labelledby="player-preview-title"><header><div><p className="eyebrow">EXPECTED PLAYER OUTPUT</p><h2 id="player-preview-title">{data?.player?.name || "Display"} Preview</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header>{error ? <p className="enrollment-error">{error}</p> : !data ? <Loading /> : !item ? <Empty text="No currently eligible content is assigned to this display." /> : <><div className="player-preview-stage"><AuthenticatedThumbnail thumbnailUrl={source?.thumbnail_url} token={token} label={label} fit={item.assignment?.display_mode === "fill" ? "cover" : "contain"} alt={`Expected output: ${source?.name || "content"}`} /></div><div className="player-preview-caption"><div><b>{source?.name || item.content?.name || item.media?.name}</b><small>{source?.type || item.media?.type || "design"} · {item.assignment.duration_seconds || 20} sec · {item.assignment?.display_mode === "fill" ? "Fill Display" : "Fit to Display"}</small></div>{items.length > 1 && <div className="button-row"><button className="secondary-button" onClick={() => setIndex((index + items.length - 1) % items.length)}>Previous</button><span>{index + 1} / {items.length}</span><button className="secondary-button" onClick={() => setIndex((index + 1) % items.length)}>Next</button></div>}</div></>}</section></div>;
 }
 
 function LayoutChangeDialog({ player, currentLayout, hasZoneAssignments, token, onClose, onSaved }: { player: Player; currentLayout?: Layout; hasZoneAssignments: boolean; token: string; onClose: () => void; onSaved: (message?: string) => void }) {
@@ -1039,8 +1058,8 @@ function LibraryPickerDialog({ token, onClose, onSelected }: { token: string; on
 function AssignmentEditorDialog({ assignment, token, onClose, onSaved }: { assignment: PlayerAssignment; token: string; onClose: () => void; onSaved: () => void }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); try { await request(`/assignments/${assignment.id}`, token, { method: "PATCH", body: JSON.stringify({ destination_type: assignment.destination_type, destination_id: assignment.destination_id, enabled: form.get("enabled") === "on", priority: Number(form.get("priority")), duration_seconds: Number(form.get("duration_seconds") || 20), transition: form.get("transition"), starts_at: form.get("starts_at") || null, ends_at: form.get("ends_at") || null, weekdays: assignment.weekdays || null, daily_start: assignment.daily_start || null, daily_end: assignment.daily_end || null }) }); onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update playback."); } finally { setBusy(false); } };
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="playback-title"><header><div><p className="eyebrow">PLAYBACK</p><h2 id="playback-title">Edit “{assignment.source?.name}”</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={save}><div className="playback-fields"><label>Duration<input name="duration_seconds" type="number" min="1" defaultValue={assignment.duration_seconds || 20} /> seconds</label><label>Transition<select name="transition" defaultValue={assignment.transition || "fade"}><option value="fade">Fade</option><option value="none">None</option><option value="slide">Slide</option></select></label><label>Priority<select name="priority" defaultValue={String(assignment.priority)}><option value="1">Normal</option><option value="2">Elevated</option><option value="3">High</option></select></label></div><label>Start <input name="starts_at" type="datetime-local" defaultValue={assignment.starts_at?.slice(0, 16) || ""} /></label><label>Expiration <input name="ends_at" type="datetime-local" defaultValue={assignment.ends_at?.slice(0, 16) || ""} /></label><label className="checkbox-label"><input name="enabled" type="checkbox" defaultChecked={assignment.enabled} />Enabled</label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save changes"}</button></footer></form></section></div>;
+  const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); try { await request(`/assignments/${assignment.id}`, token, { method: "PATCH", body: JSON.stringify({ destination_type: assignment.destination_type, destination_id: assignment.destination_id, enabled: form.get("enabled") === "on", priority: Number(form.get("priority")), duration_seconds: Number(form.get("duration_seconds") || 20), transition: form.get("transition"), display_mode: form.get("display_mode") || "fit", starts_at: form.get("starts_at") || null, ends_at: form.get("ends_at") || null, weekdays: assignment.weekdays || null, daily_start: assignment.daily_start || null, daily_end: assignment.daily_end || null }) }); onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update playback."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="playback-title"><header><div><p className="eyebrow">PLAYBACK</p><h2 id="playback-title">Edit “{assignment.source?.name}”</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={save}><div className="playback-fields"><label>Duration<input name="duration_seconds" type="number" min="1" defaultValue={assignment.duration_seconds || 20} /> seconds</label><label>Transition<select name="transition" defaultValue={assignment.transition || "fade"}><option value="fade">Fade</option><option value="none">None</option><option value="slide">Slide</option></select></label><label>Priority<select name="priority" defaultValue={String(assignment.priority)}><option value="1">Normal</option><option value="2">Elevated</option><option value="3">High</option></select></label></div><label>Display Mode<select name="display_mode" defaultValue={assignment.display_mode || "fit"}><option value="fit">Fit to Display</option><option value="fill">Fill Display</option></select><small>Fit shows the entire item. Fill may crop edges.</small></label><label>Start <input name="starts_at" type="datetime-local" defaultValue={assignment.starts_at?.slice(0, 16) || ""} /></label><label>Expiration <input name="ends_at" type="datetime-local" defaultValue={assignment.ends_at?.slice(0, 16) || ""} /></label><label className="checkbox-label"><input name="enabled" type="checkbox" defaultChecked={assignment.enabled} />Enabled</label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save changes"}</button></footer></form></section></div>;
 }
 
 function RemoveAssignmentDialog({ assignment, token, onClose, onRemoved }: { assignment: PlayerAssignment; token: string; onClose: () => void; onRemoved: () => void }) {
@@ -1064,6 +1083,7 @@ function PlayersView({
   const [showEnrollment, setShowEnrollment] = useState(false);
   const [editingPlayer, setEditingPlayer] = useState<Player | null>(null);
   const [removingPlayer, setRemovingPlayer] = useState<Player | null>(null);
+  const [menuPlayer, setMenuPlayer] = useState<Player | null>(null);
   const [previewPlayerId, setPreviewPlayerId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const reload = useCallback(
@@ -1116,8 +1136,8 @@ function PlayersView({
           Enroll Display
         </button>
       </div>
-      <details className="panel create-panel placeholder-player">
-        <summary>Add Placeholder Display</summary>
+      <details className="placeholder-player">
+        <summary>More options</summary>
         <p>
           Use this only for a record without a physical Signal Player. Real
           devices should be enrolled above.
@@ -1135,7 +1155,7 @@ function PlayersView({
             ))}
           </select>
           <input name="description" placeholder="Location (optional)" />
-          <button className="secondary-button">Add placeholder</button>
+          <button className="secondary-button">Add Placeholder Display</button>
         </form>
       </details>
       {error && <ErrorState message={error} />}
@@ -1172,8 +1192,7 @@ function PlayersView({
                 <footer>
                   <button className="secondary-button" onClick={() => setPreviewPlayerId(player.id)}>Preview</button>
                   <button className="primary" onClick={() => onManage(player.id)}>Manage Display</button>
-                  <button className="card-text-action" onClick={() => setEditingPlayer(player)}>Edit</button>
-                  <button className="card-text-action danger" onClick={() => setRemovingPlayer(player)}>Remove</button>
+                  <button className="card-text-action" title="More actions" aria-label={`More actions for ${player.name}`} onClick={() => setMenuPlayer(player)}>⋯</button>
                 </footer>
               </article>
             ))
@@ -1217,6 +1236,7 @@ function PlayersView({
           }}
         />
       )}
+      {menuPlayer && <PlayerMoreDialog player={menuPlayer} onClose={() => setMenuPlayer(null)} onEdit={() => { setEditingPlayer(menuPlayer); setMenuPlayer(null); }} onRemove={() => { setRemovingPlayer(menuPlayer); setMenuPlayer(null); }} />}
       {previewPlayerId && <PlayerPreviewDialog playerId={previewPlayerId} token={token} onClose={() => setPreviewPlayerId(null)} />}
     </>
   );
@@ -1720,6 +1740,10 @@ function LegacyEnrollmentDialog({
   );
 }
 
+function PlayerMoreDialog({ player, onClose, onEdit, onRemove }: { player: Player; onClose: () => void; onEdit: () => void; onRemove: () => void }) {
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal compact-actions" role="dialog" aria-modal="true" aria-labelledby="player-more-title"><header><div><p className="eyebrow">DISPLAY ACTIONS</p><h2 id="player-more-title">{player.name}</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="modal-action-list"><button className="secondary-button" onClick={onEdit}>Edit Display</button><button className="danger-button" onClick={onRemove}>Remove Display</button></div></section></div>;
+}
+
 function BuildingsView({
   token,
   notify,
@@ -1731,6 +1755,7 @@ function BuildingsView({
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Building | null>(null);
   const [removing, setRemoving] = useState<Building | null>(null);
+  const [adding, setAdding] = useState(false);
   const reload = useCallback(
     () =>
       request("/buildings", token)
@@ -1756,6 +1781,7 @@ function BuildingsView({
       });
       notify("Building created.");
       formElement.reset();
+      setAdding(false);
       reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to create building.");
@@ -1769,32 +1795,21 @@ function BuildingsView({
           <h1>Buildings</h1>
           <p>Buildings are the primary scope for access.</p>
         </div>
+        <button className="primary" onClick={() => setAdding(true)}>+ Add Building</button>
       </div>
-      <section className="panel create-panel">
-        <h2>Add a building</h2>
-        <form onSubmit={create} className="inline-form">
-          <input name="name" placeholder="Building name" required />
-          <input name="description" placeholder="Description (optional)" />
-          <button className="secondary-button">Add building</button>
-        </form>
-      </section>
       {error && <ErrorState message={error} />}
       {!error && (
-        <section className="panel functional-panel">
+        <section className="building-card-grid">
           {items.length ? (
             items.map((item) => (
-              <div className="content-line simple-line building-line" key={item.id}>
+              <article className="building-card" key={item.id}>
                 <div>
                   <b>{item.name}</b>
-                  <small>{item.description || "No description"} · {item.player_count || 0} display{item.player_count === 1 ? "" : "s"}</small>
+                  <small>{item.player_count || 0} display{item.player_count === 1 ? "" : "s"}</small>
                 </div>
-                <span
-                  className={item.enabled ? "state published" : "state draft"}
-                >
-                  {item.enabled ? "Active" : "Disabled"}
-                </span>
-                <div className="button-row"><button className="secondary-button" onClick={() => setEditing(item)}>Edit</button><button className="card-text-action danger" onClick={() => setRemoving(item)}>Remove</button></div>
-              </div>
+                <p>{item.description || "No description"}</p>
+                <footer><button className="secondary-button" onClick={() => setEditing(item)}>Edit</button><button className="card-text-action" title="More actions" onClick={() => setRemoving(item)}>⋯</button></footer>
+              </article>
             ))
           ) : (
             <Empty text="No buildings are visible to you yet." />
@@ -1802,9 +1817,14 @@ function BuildingsView({
         </section>
       )}
       {editing && <BuildingEditorDialog building={editing} token={token} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); notify("Building updated."); reload(); }} />}
+      {adding && <AddBuildingDialog onClose={() => setAdding(false)} onSubmit={create} />}
       {removing && <RemoveBuildingDialog building={removing} token={token} onClose={() => setRemoving(null)} onRemoved={() => { setRemoving(null); notify("Building removed from active Buildings."); reload(); }} />}
     </>
   );
+}
+
+function AddBuildingDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="building-add-title"><header><div><p className="eyebrow">ORGANIZATION</p><h2 id="building-add-title">Add Building</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={onSubmit}><label>Name<input name="name" placeholder="Building name" required /></label><label>Description<input name="description" placeholder="Description (optional)" /></label><footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary">Add Building</button></footer></form></section></div>;
 }
 
 function BuildingEditorDialog({ building, token, onClose, onSaved }: { building: Building; token: string; onClose: () => void; onSaved: () => void }) {
