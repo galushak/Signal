@@ -40,6 +40,8 @@ type Player = {
   health_state: string;
   last_seen_at?: string;
   cache_state: string;
+  content_count?: number;
+  archived_at?: string | null;
 };
 type Layout = {
   id: string;
@@ -207,6 +209,7 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [view, setView] = useState("dashboard");
   const [libraryDesignId, setLibraryDesignId] = useState<string | null>(null);
+  const [managedPlayerId, setManagedPlayerId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   useEffect(() => {
     const saved = localStorage.getItem("signal_token");
@@ -219,6 +222,10 @@ export default function Home() {
   const openLibraryDesign = useCallback((id: string) => {
     setLibraryDesignId(id);
     setView("content");
+  }, []);
+  const managePlayer = useCallback((id: string) => {
+    setManagedPlayerId(id);
+    setView("player-details");
   }, []);
   const logout = async () => {
     if (token)
@@ -346,7 +353,21 @@ export default function Home() {
               onOpenDesign={openLibraryDesign}
             />
           )}
-          {view === "players" && <PlayersView token={token} notify={show} />}
+          {view === "players" && (
+            <PlayersView
+              token={token}
+              notify={show}
+              onManage={managePlayer}
+            />
+          )}
+          {view === "player-details" && managedPlayerId && (
+            <PlayerDetailsView
+              playerId={managedPlayerId}
+              token={token}
+              notify={show}
+              onBack={() => setView("players")}
+            />
+          )}
           {view === "buildings" && (
             <BuildingsView token={token} notify={show} />
           )}
@@ -562,6 +583,7 @@ function MediaView({
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [sendItem, setSendItem] = useState<LibraryItem | null>(null);
   const reload = useCallback(
     () =>
       Promise.all([
@@ -708,6 +730,9 @@ function MediaView({
                     Open in Designer
                   </button>
                 )}
+                <button className="primary" onClick={() => setSendItem(asset)}>
+                  Send to Display
+                </button>
               </article>
             ))
           ) : (
@@ -715,21 +740,264 @@ function MediaView({
           )}
         </section>
       )}
+      {sendItem && (
+        <SendToDisplayDialog
+          item={sendItem}
+          token={token}
+          onClose={() => setSendItem(null)}
+          onSent={(display) => {
+            notify(`“${sendItem.name}” was sent to ${display}.`);
+            setSendItem(null);
+          }}
+        />
+      )}
     </>
   );
+}
+
+function SendToDisplayDialog({
+  item,
+  token,
+  onClose,
+  onSent,
+  initialDestination,
+}: {
+  item: LibraryItem;
+  token: string;
+  onClose: () => void;
+  onSent: (display: string) => void;
+  initialDestination?: string;
+}) {
+  const [destinations, setDestinations] = useState<{
+    players: Player[];
+    zones: (Zone & { layout_name: string })[];
+  }>({ players: [], zones: [] });
+  const [destination, setDestination] = useState(initialDestination || "");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    request("/destinations", token)
+      .then(setDestinations)
+      .catch((reason) => setError(reason.message));
+  }, [token]);
+  const send = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const [destinationType, destinationId] = destination.split(":");
+    if (!destinationType || !destinationId) {
+      setError("Choose a display destination.");
+      return;
+    }
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError("");
+    try {
+      await request(
+        item.kind === "design"
+          ? `/content/${item.id}/assignments`
+          : `/media/${item.id}/assignments`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            destination_type: destinationType,
+            destination_id: destinationId,
+            duration_seconds: Number(form.get("duration_seconds") || 20),
+            transition: form.get("transition"),
+            priority: Number(form.get("priority")),
+            enabled: form.get("enabled") === "on",
+            starts_at: form.get("start_mode") === "schedule" ? form.get("starts_at") || null : null,
+            ends_at: form.get("expire") === "yes" ? form.get("ends_at") || null : null,
+          }),
+        },
+      );
+      const display = destinations.players.find((player) => player.id === destinationId)?.name || destinations.zones.find((zone) => zone.id === destinationId)?.name || "this display";
+      onSent(display);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to send this item.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="enrollment-modal send-modal" role="dialog" aria-modal="true" aria-labelledby="send-title">
+        <header>
+          <div><p className="eyebrow">SEND TO DISPLAY</p><h2 id="send-title">Send “{item.name}”</h2></div>
+          <button className="close" aria-label="Close" onClick={onClose}>×</button>
+        </header>
+        <form onSubmit={send}>
+          <label>Display
+            <select value={destination} onChange={(event) => setDestination(event.target.value)} required>
+              <option value="">Choose display</option>
+              {destinations.players.map((player) => <option key={player.id} value={`player:${player.id}`}>{player.name} · {player.building_name}</option>)}
+              {destinations.zones.map((zone) => <option key={zone.id} value={`zone:${zone.id}`}>{zone.layout_name} · {zone.name}</option>)}
+            </select>
+          </label>
+          <div className="playback-fields">
+            <label>Duration<input name="duration_seconds" type="number" min="1" max="3600" defaultValue="20" /> seconds</label>
+            <label>Transition<select name="transition" defaultValue="fade"><option value="fade">Fade</option><option value="none">None</option><option value="slide">Slide</option></select></label>
+            <label>Priority<select name="priority" defaultValue="1"><option value="1">Normal</option><option value="2">Elevated</option><option value="3">High</option></select></label>
+          </div>
+          <label className="checkbox-label"><input name="enabled" type="checkbox" defaultChecked />Enabled</label>
+          <fieldset className="send-schedule"><legend>When</legend><label className="radio-label"><input name="start_mode" type="radio" value="now" defaultChecked />Start now</label><label className="radio-label"><input name="start_mode" type="radio" value="schedule" />Schedule</label><input name="starts_at" type="datetime-local" aria-label="Start date and time" /></fieldset>
+          <fieldset className="send-schedule"><legend>Expiration</legend><label className="radio-label"><input name="expire" type="radio" value="no" defaultChecked />No expiration</label><label className="radio-label"><input name="expire" type="radio" value="yes" />Expire</label><input name="ends_at" type="datetime-local" aria-label="Expiration date and time" /></fieldset>
+          {error && <p className="enrollment-error">{error}</p>}
+          <footer><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Sending…" : "Send"}</button></footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+type PlayerAssignment = {
+  id: string;
+  destination_type: string;
+  destination_id: string;
+  destination_name: string;
+  source_type: string;
+  source?: { id: string; type: string; name: string; thumbnail_url?: string | null };
+  enabled: boolean;
+  position: number;
+  priority: number;
+  duration_seconds?: number | null;
+  transition?: string | null;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  weekdays?: number[] | null;
+  daily_start?: string | null;
+  daily_end?: string | null;
+};
+
+function PlayerDetailsView({
+  playerId,
+  token,
+  notify,
+  onBack,
+}: {
+  playerId: string;
+  token: string;
+  notify: (message: string) => void;
+  onBack: () => void;
+}) {
+  const [details, setDetails] = useState<{ player: Player; assignments: PlayerAssignment[] } | null>(null);
+  const [error, setError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [sending, setSending] = useState<LibraryItem | null>(null);
+  const [editing, setEditing] = useState<PlayerAssignment | null>(null);
+  const [removing, setRemoving] = useState<PlayerAssignment | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const load = useCallback(() => request(`/players/${playerId}`, token).then(setDetails).catch((reason) => setError(reason.message)), [playerId, token]);
+  useEffect(() => { load(); }, [load]);
+  const forceSync = async () => {
+    try {
+      await request(`/players/${playerId}/commands`, token, { method: "POST", body: JSON.stringify({ command: "force_sync" }) });
+      notify("Force Sync queued. The player will process it on its next check-in.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to queue a sync.");
+    }
+  };
+  const reorder = async (destinationType: string, destinationId: string, movedId: string) => {
+    if (!details || !dragging || dragging === movedId) return;
+    const group = details.assignments.filter((item) => item.destination_type === destinationType && item.destination_id === destinationId);
+    const from = group.findIndex((item) => item.id === dragging);
+    const to = group.findIndex((item) => item.id === movedId);
+    if (from < 0 || to < 0) return;
+    const ordered = [...group];
+    const [item] = ordered.splice(from, 1);
+    ordered.splice(to, 0, item);
+    try {
+      await request(`/players/${playerId}/assignments/reorder`, token, { method: "POST", body: JSON.stringify({ destination_type: destinationType, destination_id: destinationId, assignment_ids: ordered.map((entry) => entry.id) }) });
+      notify("Display content order updated.");
+      load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to reorder display content.");
+    } finally {
+      setDragging(null);
+    }
+  };
+  if (error) return <ErrorState message={error} />;
+  if (!details) return <Loading />;
+  const { player, assignments } = details;
+  const groups = assignments.reduce<{ name: string; type: string; id: string; items: PlayerAssignment[] }[]>((result, item) => {
+    const group = result.find((entry) => entry.type === item.destination_type && entry.id === item.destination_id);
+    if (group) group.items.push(item);
+    else result.push({ name: item.destination_name, type: item.destination_type, id: item.destination_id, items: [item] });
+    return result;
+  }, []);
+  return (
+    <>
+      <button className="back" onClick={onBack}>← Players</button>
+      <section className="display-detail-header">
+        <div>
+          <p className="eyebrow">DISPLAY</p>
+          <h1>{player.name}</h1>
+          <p>{player.building_name} · {player.description || "No location details"}</p>
+          <small>{player.health_state === "online" ? "● Online" : player.health_state === "offline" ? "◐ Offline" : "○ Waiting for connection"} · Last seen {player.last_seen_at ? new Date(player.last_seen_at).toLocaleString() : "never"} · Cache {player.cache_state}</small>
+        </div>
+        <div className="button-row"><button className="secondary-button" onClick={() => notify("Preview uses the server’s current desired state for this display.")}>Preview</button><button className="secondary-button" onClick={forceSync}>Force Sync</button><button className="primary" onClick={() => setAdding(true)}>+ Add Content</button></div>
+      </section>
+      <section className="panel player-content-panel">
+        <div className="panel-heading"><div><p className="eyebrow">PLAYBACK</p><h2>Content on this Display</h2><p>Drag items to set the predictable rotation order. Changes sync automatically.</p></div></div>
+        {groups.length ? groups.map((group) => (
+          <section className="assignment-group" key={`${group.type}:${group.id}`}>
+            {groups.length > 1 && <h3>{group.name}</h3>}
+            {group.items.map((assignment) => (
+              <article className={`assigned-content ${assignment.enabled ? "" : "disabled"}`} key={assignment.id} draggable onDragStart={() => setDragging(assignment.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => reorder(group.type, group.id, assignment.id)}>
+                <span className="drag-handle" aria-label="Drag to reorder">☰</span>
+                <div className="assignment-thumb">{assignment.source?.thumbnail_url ? <img src={`${API}${assignment.source.thumbnail_url}`} alt="" /> : <span>{assignment.source?.type === "video" ? "▶" : assignment.source?.type === "pdf" ? "PDF" : assignment.source?.type === "image" ? "IMG" : "DESIGN"}</span>}</div>
+                <div className="assignment-main"><b>{assignment.source?.name || "Unavailable content"}</b><small>{assignment.source?.type || assignment.source_type} · {assignment.duration_seconds || 20} sec · {assignment.transition || "None"}{assignment.starts_at ? ` · Starts ${new Date(assignment.starts_at).toLocaleString()}` : ""}{assignment.ends_at ? ` · Expires ${new Date(assignment.ends_at).toLocaleString()}` : ""}</small></div>
+                <span className={assignment.enabled ? "state published" : "state draft"}>{assignment.enabled ? "Active" : "Disabled"}</span>
+                <div className="assignment-actions"><button className="secondary-button" onClick={() => setEditing(assignment)}>Edit Playback</button><button className="card-text-action" onClick={() => setRemoving(assignment)}>Remove</button></div>
+              </article>
+            ))}
+          </section>
+        )) : <Empty text="No content is assigned to this display yet. Add a design, image, video, or PDF from the real Library." />}
+      </section>
+      {adding && <LibraryPickerDialog token={token} onClose={() => setAdding(false)} onSelected={(item) => { setAdding(false); setSending(item); }} />}
+      {sending && <SendToDisplayDialog item={sending} token={token} initialDestination={`player:${player.id}`} onClose={() => setSending(null)} onSent={() => { notify(`“${sending.name}” was sent to ${player.name}.`); setSending(null); load(); }} />}
+      {editing && <AssignmentEditorDialog assignment={editing} token={token} onClose={() => setEditing(null)} onSaved={() => { notify("Playback settings updated."); setEditing(null); load(); }} />}
+      {removing && <RemoveAssignmentDialog assignment={removing} token={token} onClose={() => setRemoving(null)} onRemoved={() => { notify("Content was removed from this display. The original item remains in Signal."); setRemoving(null); load(); }} />}
+    </>
+  );
+}
+
+function LibraryPickerDialog({ token, onClose, onSelected }: { token: string; onClose: () => void; onSelected: (item: LibraryItem) => void }) {
+  const [items, setItems] = useState<LibraryItem[]>([]);
+  const [search, setSearch] = useState("");
+  const [kind, setKind] = useState("all");
+  const [error, setError] = useState("");
+  useEffect(() => { request(`/library?kind=${kind}&search=${encodeURIComponent(search)}`, token).then(setItems).catch((reason) => setError(reason.message)); }, [kind, search, token]);
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal library-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><header><div><p className="eyebrow">LIBRARY</p><h2 id="picker-title">Add Content</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="picker-controls"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search library" /><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All types</option><option value="design">Designs</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option></select></div>{error ? <p className="enrollment-error">{error}</p> : <div className="picker-items">{items.map((item) => <button key={`${item.kind}-${item.id}`} className="picker-item" onClick={() => onSelected(item)}><span>{item.kind.toUpperCase()}</span><div><b>{item.name}</b><small>{item.status}</small></div></button>)}</div>}</section></div>;
+}
+
+function AssignmentEditorDialog({ assignment, token, onClose, onSaved }: { assignment: PlayerAssignment; token: string; onClose: () => void; onSaved: () => void }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); try { await request(`/assignments/${assignment.id}`, token, { method: "PATCH", body: JSON.stringify({ destination_type: assignment.destination_type, destination_id: assignment.destination_id, enabled: form.get("enabled") === "on", priority: Number(form.get("priority")), duration_seconds: Number(form.get("duration_seconds") || 20), transition: form.get("transition"), starts_at: form.get("starts_at") || null, ends_at: form.get("ends_at") || null, weekdays: assignment.weekdays || null, daily_start: assignment.daily_start || null, daily_end: assignment.daily_end || null }) }); onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update playback."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="playback-title"><header><div><p className="eyebrow">PLAYBACK</p><h2 id="playback-title">Edit “{assignment.source?.name}”</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={save}><div className="playback-fields"><label>Duration<input name="duration_seconds" type="number" min="1" defaultValue={assignment.duration_seconds || 20} /> seconds</label><label>Transition<select name="transition" defaultValue={assignment.transition || "fade"}><option value="fade">Fade</option><option value="none">None</option><option value="slide">Slide</option></select></label><label>Priority<select name="priority" defaultValue={String(assignment.priority)}><option value="1">Normal</option><option value="2">Elevated</option><option value="3">High</option></select></label></div><label>Start <input name="starts_at" type="datetime-local" defaultValue={assignment.starts_at?.slice(0, 16) || ""} /></label><label>Expiration <input name="ends_at" type="datetime-local" defaultValue={assignment.ends_at?.slice(0, 16) || ""} /></label><label className="checkbox-label"><input name="enabled" type="checkbox" defaultChecked={assignment.enabled} />Enabled</label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save changes"}</button></footer></form></section></div>;
+}
+
+function RemoveAssignmentDialog({ assignment, token, onClose, onRemoved }: { assignment: PlayerAssignment; token: string; onClose: () => void; onRemoved: () => void }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const remove = async () => { setBusy(true); try { await request(`/assignments/${assignment.id}`, token, { method: "DELETE" }); onRemoved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to remove this item."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="remove-assignment-title"><header><div><p className="eyebrow">REMOVE FROM DISPLAY</p><h2 id="remove-assignment-title">Remove “{assignment.source?.name}”?</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="remove-player-copy"><p>This removes “{assignment.source?.name}” from this display. The original content will remain in Signal.</p>{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="danger-button" onClick={remove} disabled={busy}>{busy ? "Removing…" : "Remove from Display"}</button></footer></section></div>;
 }
 
 function PlayersView({
   token,
   notify,
+  onManage,
 }: {
   token: string;
   notify: (m: string) => void;
+  onManage: (id: string) => void;
 }) {
   const [players, setPlayers] = useState<Player[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [showEnrollment, setShowEnrollment] = useState(false);
   const [editingPlayer, setEditingPlayer] = useState<Player | null>(null);
+  const [removingPlayer, setRemovingPlayer] = useState<Player | null>(null);
   const [error, setError] = useState("");
   const reload = useCallback(
     () =>
@@ -769,22 +1037,6 @@ function PlayersView({
       setError(e instanceof Error ? e.message : "Unable to create player.");
     }
   };
-  const deletePlayer = async (player: Player) => {
-    if (
-      !window.confirm(
-        `Delete ${player.name}? This removes its enrollment and cannot be undone.`,
-      )
-    ) {
-      return;
-    }
-    try {
-      await request(`/players/${player.id}`, token, { method: "DELETE" });
-      notify(`${player.name} was deleted.`);
-      reload();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to delete player.");
-    }
-  };
   return (
     <>
       <div className="page-title">
@@ -821,73 +1073,42 @@ function PlayersView({
       </details>
       {error && <ErrorState message={error} />}
       {!error && (
-        <section className="panel functional-panel player-table">
-          <div className="table-head player-table-head">
-            <span>DISPLAY</span>
-            <span>BUILDING</span>
-            <span>ENROLLMENT</span>
-            <span>CONNECTION</span>
-            <span>CACHE</span>
-            <span>ACTIONS</span>
-          </div>
+        <section className="player-card-grid">
           {players.length ? (
             players.map((player) => (
-              <div className="content-line player-line" key={player.id}>
-                <div>
-                  <b>{player.name}</b>
-                  <small>
-                    {player.description || "No location details yet"}
-                  </small>
-                </div>
-                <span>{player.building_name}</span>
-                <span
-                  className={
-                    player.enrollment_status === "enrolled"
-                      ? "state published"
-                      : player.enrollment_status === "pending"
-                      ? "state scheduled"
-                      : "state published"
-                  }
-                >
-                  {player.enrollment_status === "enrolled"
-                    ? "Enrolled"
-                    : player.enrollment_status === "pending"
-                      ? "Awaiting code"
-                      : "Not enrolled"}
-                </span>
-                <span
-                  className={
-                    player.health_state === "online"
-                      ? "state published"
-                      : "state scheduled"
-                  }
-                >
-                  {player.health_state === "online"
-                    ? "Online"
-                    : player.health_state === "offline"
-                      ? "Offline"
-                      : player.health_state === "waiting_for_enrollment"
-                        ? "Waiting for enrollment"
-                        : player.health_state === "not_enrolled"
-                          ? "Not enrolled"
-                          : "Waiting for first heartbeat"}
-                </span>
-                <span>{player.cache_state}</span>
-                <span className="player-actions">
-                  <button
-                    className="table-action"
-                    onClick={() => setEditingPlayer(player)}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className="table-action danger"
-                    onClick={() => deletePlayer(player)}
-                  >
-                    Delete
-                  </button>
-                </span>
-              </div>
+              <article className="display-card" key={player.id}>
+                <header>
+                  <div>
+                    <button className="display-name" onClick={() => onManage(player.id)}>
+                      {player.name}
+                    </button>
+                    <p>{player.building_name}</p>
+                  </div>
+                  <span className={player.health_state === "online" ? "state published" : "state scheduled"}>
+                    {player.health_state === "online"
+                      ? "● Online"
+                      : player.health_state === "offline"
+                        ? "◐ Offline"
+                        : player.health_state === "waiting_for_enrollment"
+                          ? "Waiting for enrollment"
+                          : player.health_state === "not_enrolled"
+                            ? "Not enrolled"
+                            : "Never connected"}
+                  </span>
+                </header>
+                <p className="display-location">{player.description || "No location details"}</p>
+                <dl className="display-facts">
+                  <div><dt>Content</dt><dd>{player.content_count || 0} item{player.content_count === 1 ? "" : "s"}</dd></div>
+                  <div><dt>Cache</dt><dd>{player.cache_state || "Unknown"}</dd></div>
+                  <div><dt>Last seen</dt><dd>{player.last_seen_at ? new Date(player.last_seen_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "—"}</dd></div>
+                </dl>
+                <footer>
+                  <button className="secondary-button" onClick={() => onManage(player.id)}>Preview</button>
+                  <button className="primary" onClick={() => onManage(player.id)}>Manage Display</button>
+                  <button className="card-text-action" onClick={() => setEditingPlayer(player)}>Edit</button>
+                  <button className="card-text-action danger" onClick={() => setRemovingPlayer(player)}>Remove</button>
+                </footer>
+              </article>
             ))
           ) : (
             <Empty text="No players are assigned to you yet." />
@@ -913,6 +1134,18 @@ function PlayersView({
           onSaved={(name) => {
             setEditingPlayer(null);
             notify(`${name} was updated.`);
+            reload();
+          }}
+        />
+      )}
+      {removingPlayer && (
+        <RemovePlayerDialog
+          player={removingPlayer}
+          token={token}
+          onClose={() => setRemovingPlayer(null)}
+          onRemoved={() => {
+            notify(`${removingPlayer.name} was removed from active Players.`);
+            setRemovingPlayer(null);
             reload();
           }}
         />
@@ -1000,6 +1233,60 @@ function PlayerEditorDialog({
             <button className="primary" disabled={busy}>{busy ? "Saving…" : "Save changes"}</button>
           </footer>
         </form>
+      </section>
+    </div>
+  );
+}
+
+function RemovePlayerDialog({
+  player,
+  token,
+  onClose,
+  onRemoved,
+}: {
+  player: Player;
+  token: string;
+  onClose: () => void;
+  onRemoved: () => void;
+}) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const remove = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/players/${player.id}`, token, { method: "DELETE" });
+      onRemoved();
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Signal could not remove this display.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const enrolled = player.enrollment_status === "enrolled";
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="remove-player-title">
+        <header>
+          <div>
+            <p className="eyebrow">REMOVE DISPLAY</p>
+            <h2 id="remove-player-title">Remove “{player.name}”?</h2>
+          </div>
+          <button className="close" aria-label="Close" onClick={onClose}>×</button>
+        </header>
+        <div className="remove-player-copy">
+          <p>This display will no longer appear in active Players. Existing content and media will not be deleted, and historical audit information will be preserved.</p>
+          {enrolled && <p className="enrollment-error">This display is currently enrolled. Removing it revokes device access; the physical player will return to safe re-enrollment after its next checks.</p>}
+          {error && <p className="enrollment-error">{error}</p>}
+        </div>
+        <footer className="modal-footer">
+          <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="danger-button" onClick={remove} disabled={busy}>{busy ? "Removing…" : "Remove Display"}</button>
+        </footer>
       </section>
     </div>
   );
@@ -1904,6 +2191,7 @@ function DesignerScreen({
 }) {
   const [saving, setSaving] = useState("Saved ✓");
   const [publishOpen, setPublishOpen] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
   const [published, setPublished] = useState(
     Boolean(content.published_version),
   );
@@ -1948,6 +2236,9 @@ function DesignerScreen({
           </button>
           <button className="primary" onClick={() => setPublishOpen(true)}>
             Publish
+          </button>
+          <button className="secondary-button" onClick={() => setSendOpen(true)}>
+            Send to Display
           </button>
         </div>
       </header>
@@ -1997,6 +2288,17 @@ function DesignerScreen({
             </footer>
           </section>
         </div>
+      )}
+      {sendOpen && (
+        <SendToDisplayDialog
+          item={{ id: content.id, kind: "design", name: content.name, status: published ? "Published" : "Draft", updated_at: "" }}
+          token={token}
+          onClose={() => setSendOpen(false)}
+          onSent={(display) => {
+            notify(`“${content.name}” was sent to ${display}.`);
+            setSendOpen(false);
+          }}
+        />
       )}
     </main>
   );

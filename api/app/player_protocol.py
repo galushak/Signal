@@ -50,6 +50,7 @@ def _assignment_data(item: ContentAssignment) -> dict:
         "destinationId": item.destination_id,
         "enabled": item.enabled,
         "priority": item.priority,
+        "position": item.position,
         "durationSeconds": item.duration_seconds or 20,
         "transition": item.transition or "none",
         "startsAt": item.starts_at.isoformat() if item.starts_at else None,
@@ -57,6 +58,7 @@ def _assignment_data(item: ContentAssignment) -> dict:
         "weekdays": item.weekdays,
         "dailyStart": item.daily_start,
         "dailyEnd": item.daily_end,
+        "createdAt": item.created_at.isoformat() if item.created_at else None,
     }
 
 
@@ -70,10 +72,22 @@ def build_manifest(player: Player, db: Session) -> dict:
     destinations = {player.id, *(zone.id for zone in zones)}
     content_items: list[dict] = []
     asset_ids: set[str] = set()
-    assignments = db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations), ContentAssignment.enabled.is_(True))).all()
+    assignments = db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))).all()
     for assignment in assignments:
-        content = db.get(Content, assignment.content_id)
-        version = db.scalar(select(ContentVersion).where(ContentVersion.content_id == assignment.content_id, ContentVersion.state == "published"))
+        if assignment.source_type == "media" and assignment.media_asset_id:
+            asset = db.get(MediaAsset, assignment.media_asset_id)
+            if not asset or asset.trashed_at:
+                continue
+            asset_ids.add(asset.id)
+            content_items.append({
+                "id": assignment.id,
+                "name": asset.display_name,
+                "source": {"type": asset.media_type, "assetId": asset.id, "fit": "contain"},
+                "assignment": _assignment_data(assignment),
+            })
+            continue
+        content = db.get(Content, assignment.content_id) if assignment.content_id else None
+        version = db.scalar(select(ContentVersion).where(ContentVersion.content_id == assignment.content_id, ContentVersion.state == "published")) if assignment.content_id else None
         if not content or not version or content.trashed_at:
             continue
         document = version.design_document or {}
@@ -82,6 +96,7 @@ def build_manifest(player: Player, db: Session) -> dict:
             "id": content.id,
             "name": content.name,
             "revision": version.revision,
+            "source": {"type": "design"},
             "design": document,
             "assignment": _assignment_data(assignment),
         })
@@ -103,7 +118,7 @@ def build_manifest(player: Player, db: Session) -> dict:
         "timezone": settings.player_timezone,
         "display": {"logicalWidth": 1920, "logicalHeight": 1080, "resolution": player.resolution or "1920x1080"},
         "layout": None if not layout else {"id": layout.id, "name": layout.name, "version": layout.updated_at.isoformat() if layout.updated_at else None, "canvas": {"width": layout.logical_width, "height": layout.logical_height}, "zones": [{"id": zone.id, "name": zone.name, "x": zone.x, "y": zone.y, "width": zone.width, "height": zone.height, "zIndex": zone.z_index, "background": zone.background, "border": zone.border, "padding": zone.padding} for zone in zones]},
-        "content": sorted(content_items, key=lambda item: (item["assignment"]["destinationId"], -item["assignment"]["priority"], item["id"])),
+        "content": sorted(content_items, key=lambda item: (item["assignment"]["destinationId"], item["assignment"]["position"], item["assignment"]["createdAt"] if item["assignment"].get("createdAt") else "", item["id"])),
         "media": media,
     }
     # generatedAt is observability metadata, not a desired-state change.

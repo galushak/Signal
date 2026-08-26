@@ -151,6 +151,12 @@ class AssignmentInput(BaseModel):
     daily_end: str | None = None
 
 
+class AssignmentReorderInput(BaseModel):
+    destination_type: str
+    destination_id: str
+    assignment_ids: list[str] = Field(min_length=1)
+
+
 class TemplateInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     design_document: dict
@@ -177,7 +183,7 @@ def player_data(player: Player) -> dict:
     last_seen = auth.utc_datetime(player.last_seen_at) if player.last_seen_at else None
     state = "waiting_for_enrollment" if player.enrollment_status == "pending" else ("not_enrolled" if player.enrollment_status == "not_enrolled" else ("never_connected" if not last_seen else ("online" if datetime.now(UTC) - last_seen <= timedelta(seconds=75) else "offline")))
     runtime = player.runtime_data or {}
-    return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
+    return {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "archived_at": player.archived_at, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
 
 
 def agent_player(request: Request, db: Session) -> Player:
@@ -202,7 +208,7 @@ def scope_valid(scope_type: str, scope_id: str | None, db: Session) -> None:
         raise HTTPException(status_code=422, detail="District access does not need a specific item.")
     if scope_type == BUILDING and (not scope_id or not db.get(Building, scope_id)):
         raise HTTPException(status_code=422, detail="Choose a valid building.")
-    if scope_type == PLAYER and (not scope_id or not db.get(Player, scope_id)):
+    if scope_type == PLAYER and (not scope_id or not (player := db.get(Player, scope_id)) or player.archived_at):
         raise HTTPException(status_code=422, detail="Choose a valid player.")
     if scope_type == ZONE and (not scope_id or not db.get(Zone, scope_id)):
         raise HTTPException(status_code=422, detail="Choose a valid zone.")
@@ -259,7 +265,7 @@ def change_password(payload: PasswordInput, request: Request, user: User = Depen
 @router.get("/dashboard")
 def dashboard(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     player_ids = visible_player_ids(user, db)
-    players_query = select(Player)
+    players_query = select(Player).where(Player.archived_at.is_(None))
     if player_ids is not None:
         players_query = players_query.where(Player.id.in_(player_ids)) if player_ids else players_query.where(False)
     players = db.scalars(players_query).all()
@@ -301,9 +307,9 @@ def update_building(building_id: str, payload: BuildingInput, request: Request, 
 
 @router.get("/players")
 def list_players(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    ids = visible_player_ids(user, db); query = select(Player).order_by(Player.name)
+    ids = visible_player_ids(user, db); query = select(Player).where(Player.archived_at.is_(None)).order_by(Player.name)
     if ids is not None: query = query.where(Player.id.in_(ids)) if ids else query.where(False)
-    return [player_data(item) for item in db.scalars(query)]
+    return [{**player_data(item), "content_count": player_content_count(item, db)} for item in db.scalars(query)]
 
 
 @router.post("/players", status_code=201)
@@ -319,7 +325,7 @@ def create_player(payload: PlayerInput, request: Request, user: User = Depends(a
 @router.patch("/players/{player_id}")
 def update_player(player_id: str, payload: PlayerInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     player = db.get(Player, player_id)
-    if not player: raise HTTPException(status_code=404, detail="Player not found.")
+    if not player or player.archived_at: raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "manage_players", PLAYER, player.id, db); scope_valid(BUILDING, payload.building_id, db)
     if payload.layout_id and not db.get(Layout, payload.layout_id): raise HTTPException(status_code=422, detail="Choose a valid layout.")
     player.name, player.building_id, player.description, player.enabled, player.resolution, player.layout_id = payload.name.strip(), payload.building_id, payload.description, payload.enabled, payload.resolution, payload.layout_id
@@ -327,21 +333,27 @@ def update_player(player_id: str, payload: PlayerInput, request: Request, user: 
     db.commit(); db.refresh(player); return player_data(player)
 
 
-@router.delete("/players/{player_id}", status_code=204)
+@router.delete("/players/{player_id}")
 def delete_player(player_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     player = db.get(Player, player_id)
-    if not player:
+    if not player or player.archived_at:
         raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "manage_players", PLAYER, player.id, db)
-    # Clear related operational records before removing the display. The
-    # immutable audit-event log retains the administrative deletion record.
-    for enrollment in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.player_id == player.id)).all():
-        db.delete(enrollment)
-    for command in db.scalars(select(PlayerCommand).where(PlayerCommand.player_id == player.id)).all():
-        db.delete(command)
-    record(db, actor=user, action="player.deleted", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
-    db.delete(player)
+    now = datetime.now(UTC)
+    player.archived_at = now
+    player.archived_by_id = user.id
+    player.enabled = False
+    player.enrollment_status = "archived"
+    player.device_secret_hash = None
+    for enrollment in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.player_id == player.id, PlayerEnrollment.claimed_at.is_(None), PlayerEnrollment.cancelled_at.is_(None))).all():
+        enrollment.cancelled_at = now
+        enrollment.display_code = None
+    for command in db.scalars(select(PlayerCommand).where(PlayerCommand.player_id == player.id, PlayerCommand.status.in_(("queued", "delivered")))).all():
+        command.status = "cancelled"
+        command.completed_at = now
+    record(db, actor=user, action="player.archived", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"credential_revoked": True})
     db.commit()
+    return {"ok": True, "message": f'{player.name} was removed from active Players.'}
 
 
 ENROLLMENT_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -508,7 +520,7 @@ def retired_admin_claim():
 @router.post("/players/{player_id}/commands", status_code=201)
 def queue_player_command(player_id: str, payload: CommandInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     player = db.get(Player, player_id)
-    if not player: raise HTTPException(status_code=404, detail="Player not found.")
+    if not player or player.archived_at: raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "restart_players", PLAYER, player.id, db)
     if payload.command not in {"force_sync", "restart_renderer", "restart_player", "clear_cache", "screenshot"}:
         raise HTTPException(status_code=422, detail="Unsupported player command.")
@@ -746,8 +758,51 @@ def version_data(version: ContentVersion | None) -> dict | None:
     return {"id": version.id, "revision": version.revision, "state": version.state, "design_document": version.design_document, "note": version.note, "created_by_id": version.created_by_id, "created_at": version.created_at, "published_at": version.published_at}
 
 
-def assignment_data(item: ContentAssignment) -> dict:
-    return {"id": item.id, "content_id": item.content_id, "destination_type": item.destination_type, "destination_id": item.destination_id, "enabled": item.enabled, "priority": item.priority, "duration_seconds": item.duration_seconds, "transition": item.transition, "starts_at": item.starts_at, "ends_at": item.ends_at, "weekdays": item.weekdays, "daily_start": item.daily_start, "daily_end": item.daily_end}
+def assignment_data(item: ContentAssignment, db: Session | None = None) -> dict:
+    data = {"id": item.id, "content_id": item.content_id, "media_asset_id": item.media_asset_id, "source_type": item.source_type, "destination_type": item.destination_type, "destination_id": item.destination_id, "enabled": item.enabled, "priority": item.priority, "position": item.position, "duration_seconds": item.duration_seconds, "transition": item.transition, "starts_at": item.starts_at, "ends_at": item.ends_at, "weekdays": item.weekdays, "daily_start": item.daily_start, "daily_end": item.daily_end, "created_at": item.created_at, "updated_at": item.updated_at}
+    if db is None:
+        return data
+    if item.source_type == "media" and item.media_asset_id:
+        asset = db.get(MediaAsset, item.media_asset_id)
+        if asset:
+            data["source"] = {"id": asset.id, "type": asset.media_type, "name": asset.display_name, "thumbnail_url": f"/api/v1/media/{asset.id}/thumbnail" if asset.thumbnail_path else None}
+    elif item.content_id:
+        content = db.get(Content, item.content_id)
+        if content:
+            data["source"] = {"id": content.id, "type": "design", "name": content.name, "thumbnail_url": f"/api/v1/content/{content.id}/thumbnail.svg"}
+    return data
+
+
+def affected_players(destination_type: str, destination_id: str, db: Session) -> list[Player]:
+    if destination_type == PLAYER:
+        player = db.get(Player, destination_id)
+        return [player] if player and not player.archived_at else []
+    zone = db.get(Zone, destination_id)
+    if not zone:
+        return []
+    return list(db.scalars(select(Player).where(Player.layout_id == zone.layout_id, Player.archived_at.is_(None))))
+
+
+def refresh_desired_state(destination_type: str, destination_id: str, db: Session) -> None:
+    for player in affected_players(destination_type, destination_id, db):
+        player.desired_state_revision = build_manifest(player, db)["revision"]
+
+
+def player_content_count(player: Player, db: Session) -> int:
+    destinations = [player.id]
+    if player.layout_id:
+        destinations.extend(db.scalars(select(Zone.id).where(Zone.layout_id == player.layout_id, Zone.enabled.is_(True))).all())
+    return int(db.scalar(select(func.count()).select_from(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))) or 0)
+
+
+def assignment_source(item: ContentAssignment, user: User, db: Session) -> tuple[str, str]:
+    if item.source_type == "media" and item.media_asset_id:
+        asset = media_for_user(item.media_asset_id, user, db)
+        return "media", asset.display_name
+    if item.content_id:
+        content = content_for_user(item.content_id, "view", user, db)
+        return "content", content.name
+    raise HTTPException(status_code=409, detail="This assignment no longer has playable source content.")
 
 
 @router.get("/layouts")
@@ -926,38 +981,106 @@ def restore_content(content_id: str, revision: int, request: Request, user: User
 
 @router.post("/content/{content_id}/assignments", status_code=201)
 def create_assignment(content_id: str, payload: AssignmentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    item = content_for_user(content_id, "schedule", user, db)
+    item = content_for_user(content_id, "view", user, db)
+    if payload.destination_type not in {PLAYER, ZONE}: raise HTTPException(status_code=422, detail="Choose a player or zone destination.")
+    scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
+    if not db.scalar(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "published")):
+        raise HTTPException(status_code=409, detail="Publish this design before sending it to a display.")
+    if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
+    if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
+    if payload.weekdays and any(day not in range(7) for day in payload.weekdays): raise HTTPException(status_code=422, detail="Weekdays must be numbers from 0 (Monday) to 6 (Sunday).")
+    max_position = db.scalar(select(func.max(ContentAssignment.position)).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id))
+    position = max_position + 1 if max_position is not None else 0
+    assignment = ContentAssignment(content_id=item.id, source_type="content", position=position, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); refresh_desired_state(payload.destination_type, payload.destination_id, db); record(db, actor=user, action="assignment.sent_to_display", resource_type="assignment", resource_id=assignment.id, resource_name=item.name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"source_type": "design", "position": position}); db.commit(); return assignment_data(assignment, db)
+
+
+@router.post("/media/{asset_id}/assignments", status_code=201)
+def create_media_assignment(asset_id: str, payload: AssignmentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    asset = media_for_user(asset_id, user, db)
+    if asset.processing_state != "ready":
+        raise HTTPException(status_code=409, detail="Wait for Signal to finish preparing this media before sending it.")
     if payload.destination_type not in {PLAYER, ZONE}: raise HTTPException(status_code=422, detail="Choose a player or zone destination.")
     scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
     if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
     if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
-    if payload.weekdays and any(day not in range(7) for day in payload.weekdays): raise HTTPException(status_code=422, detail="Weekdays must be numbers from 0 (Monday) to 6 (Sunday).")
-    assignment = ContentAssignment(content_id=item.id, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); record(db, actor=user, action="assignment.created", resource_type="assignment", resource_id=assignment.id, resource_name=item.name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request)); db.commit(); return assignment_data(assignment)
+    max_position = db.scalar(select(func.max(ContentAssignment.position)).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id))
+    position = max_position + 1 if max_position is not None else 0
+    assignment = ContentAssignment(media_asset_id=asset.id, source_type="media", position=position, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); refresh_desired_state(payload.destination_type, payload.destination_id, db); record(db, actor=user, action="assignment.sent_to_display", resource_type="assignment", resource_id=assignment.id, resource_name=asset.display_name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"source_type": asset.media_type, "position": position}); db.commit(); return assignment_data(assignment, db)
 
 
 @router.get("/content/{content_id}/assignments")
 def list_assignments(content_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     content_for_user(content_id, "view", user, db)
-    return [assignment_data(item) for item in db.scalars(select(ContentAssignment).where(ContentAssignment.content_id == content_id)) if allowed(user, "view", item.destination_type, item.destination_id, db)]
+    return [assignment_data(item, db) for item in db.scalars(select(ContentAssignment).where(ContentAssignment.content_id == content_id).order_by(ContentAssignment.position)) if allowed(user, "view", item.destination_type, item.destination_id, db)]
 
 
 @router.patch("/assignments/{assignment_id}")
 def update_assignment(assignment_id: str, payload: AssignmentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     assignment = db.get(ContentAssignment, assignment_id)
     if not assignment: raise HTTPException(status_code=404, detail="Assignment not found.")
-    content_for_user(assignment.content_id, "schedule", user, db); scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
+    _, source_name = assignment_source(assignment, user, db); require(user, "schedule", assignment.destination_type, assignment.destination_id, db); scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
     if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The expiration must be after the start time.")
     if payload.transition not in {None, "none", "fade", "slide"}: raise HTTPException(status_code=422, detail="Choose None, Fade, or Slide for the transition.")
+    previous_destination = (assignment.destination_type, assignment.destination_id)
     for key, value in payload.model_dump().items(): setattr(assignment, key, value)
-    record(db, actor=user, action="assignment.updated", resource_type="assignment", resource_id=assignment.id, scope_type=assignment.destination_type, scope_id=assignment.destination_id, source_ip=auth.client_ip(request)); db.commit(); return assignment_data(assignment)
+    refresh_desired_state(*previous_destination, db); refresh_desired_state(assignment.destination_type, assignment.destination_id, db)
+    record(db, actor=user, action="assignment.playback_updated", resource_type="assignment", resource_id=assignment.id, resource_name=source_name, scope_type=assignment.destination_type, scope_id=assignment.destination_id, source_ip=auth.client_ip(request)); db.commit(); return assignment_data(assignment, db)
 
 
 @router.delete("/assignments/{assignment_id}")
 def delete_assignment(assignment_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     assignment = db.get(ContentAssignment, assignment_id)
     if not assignment: raise HTTPException(status_code=404, detail="Assignment not found.")
-    content_for_user(assignment.content_id, "schedule", user, db); require(user, "schedule", assignment.destination_type, assignment.destination_id, db); db.delete(assignment)
-    record(db, actor=user, action="assignment.removed", resource_type="assignment", resource_id=assignment_id, scope_type=assignment.destination_type, scope_id=assignment.destination_id, source_ip=auth.client_ip(request)); db.commit(); return {"ok": True}
+    _, source_name = assignment_source(assignment, user, db); require(user, "schedule", assignment.destination_type, assignment.destination_id, db)
+    destination = (assignment.destination_type, assignment.destination_id); db.delete(assignment); db.flush(); refresh_desired_state(*destination, db)
+    record(db, actor=user, action="assignment.removed_from_display", resource_type="assignment", resource_id=assignment_id, resource_name=source_name, scope_type=destination[0], scope_id=destination[1], source_ip=auth.client_ip(request)); db.commit(); return {"ok": True}
+
+
+@router.get("/players/{player_id}")
+def player_details(player_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player or player.archived_at:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "view", PLAYER, player.id, db)
+    layout = db.get(Layout, player.layout_id) if player.layout_id else None
+    destinations = {player.id}
+    destination_names = {(PLAYER, player.id): "Full display"}
+    if layout:
+        for zone in layout.zones:
+            if zone.enabled:
+                destinations.add(zone.id)
+                destination_names[(ZONE, zone.id)] = zone.name
+    assignments = []
+    for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations)).order_by(ContentAssignment.destination_type, ContentAssignment.destination_id, ContentAssignment.position, ContentAssignment.created_at)):
+        if allowed(user, "view", assignment.destination_type, assignment.destination_id, db):
+            assignments.append({**assignment_data(assignment, db), "destination_name": destination_names.get((assignment.destination_type, assignment.destination_id), "Display")})
+    return {"player": player_data(player), "layout": layout_data(layout) if layout else None, "assignments": assignments}
+
+
+@router.post("/players/{player_id}/assignments/reorder")
+def reorder_player_assignments(player_id: str, payload: AssignmentReorderInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player or player.archived_at:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    if payload.destination_type not in {PLAYER, ZONE}:
+        raise HTTPException(status_code=422, detail="Choose a player or zone destination.")
+    if payload.destination_type == PLAYER and payload.destination_id != player.id:
+        raise HTTPException(status_code=422, detail="Assignments must belong to this display.")
+    if payload.destination_type == ZONE:
+        zone = db.get(Zone, payload.destination_id)
+        if not zone or zone.layout_id != player.layout_id:
+            raise HTTPException(status_code=422, detail="Choose a zone from this display's layout.")
+    require(user, "schedule", payload.destination_type, payload.destination_id, db)
+    assignments = list(db.scalars(select(ContentAssignment).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id).order_by(ContentAssignment.position, ContentAssignment.created_at)))
+    if len(assignments) != len(payload.assignment_ids) or {item.id for item in assignments} != set(payload.assignment_ids):
+        raise HTTPException(status_code=422, detail="Send the complete ordered list for one display destination.")
+    by_id = {item.id: item for item in assignments}
+    for position, assignment_id in enumerate(payload.assignment_ids):
+        by_id[assignment_id].position = position
+    refresh_desired_state(payload.destination_type, payload.destination_id, db)
+    record(db, actor=user, action="assignment.reordered", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"assignment_ids": payload.assignment_ids})
+    db.commit()
+    return [assignment_data(by_id[assignment_id], db) for assignment_id in payload.assignment_ids]
 
 
 @router.get("/templates")
@@ -968,10 +1091,10 @@ def list_templates(user: User = Depends(auth.get_current_user), db: Session = De
 
 @router.get("/destinations")
 def list_destinations(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    players = [player_data(item) for item in db.scalars(select(Player).order_by(Player.name)) if allowed(user, "view", PLAYER, item.id, db)]
+    players = [player_data(item) for item in db.scalars(select(Player).where(Player.archived_at.is_(None)).order_by(Player.name)) if allowed(user, "schedule", PLAYER, item.id, db)]
     zones = []
     for item in db.scalars(select(Zone).order_by(Zone.name)):
-        if allowed(user, "view", ZONE, item.id, db): zones.append({**zone_data(item), "layout_name": item.layout.name})
+        if allowed(user, "schedule", ZONE, item.id, db): zones.append({**zone_data(item), "layout_name": item.layout.name})
     return {"players": players, "zones": zones}
 
 
@@ -996,10 +1119,17 @@ def eligible(assignment: ContentAssignment, now: datetime) -> bool:
 @router.get("/players/{player_id}/preview")
 def player_preview(player_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     player = db.get(Player, player_id)
-    if not player: raise HTTPException(status_code=404, detail="Player not found.")
+    if not player or player.archived_at: raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "view", PLAYER, player.id, db); layout = db.get(Layout, player.layout_id) if player.layout_id else None; now = datetime.now(UTC); destinations = [player.id] + ([zone.id for zone in layout.zones if zone.enabled] if layout else [])
     items = []
     for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.destination_id.in_(destinations))):
-        content = db.get(Content, assignment.content_id); published = db.scalar(select(ContentVersion).where(ContentVersion.content_id == assignment.content_id, ContentVersion.state == "published"))
-        if content and published and eligible(assignment, now): items.append({"assignment": assignment_data(assignment), "content": {"id": content.id, "name": content.name, "revision": version_data(published)}, "destination_type": assignment.destination_type})
-    return {"kind": "server_desired_state", "player": player_data(player), "layout": layout_data(layout) if layout else None, "eligible_assignments": sorted(items, key=lambda item: item["assignment"]["priority"], reverse=True), "generated_at": now}
+        if not eligible(assignment, now):
+            continue
+        if assignment.source_type == "media" and assignment.media_asset_id:
+            asset = db.get(MediaAsset, assignment.media_asset_id)
+            if asset and not asset.trashed_at:
+                items.append({"assignment": assignment_data(assignment, db), "media": {"id": asset.id, "name": asset.display_name, "type": asset.media_type}, "destination_type": assignment.destination_type})
+            continue
+        content = db.get(Content, assignment.content_id) if assignment.content_id else None; published = db.scalar(select(ContentVersion).where(ContentVersion.content_id == assignment.content_id, ContentVersion.state == "published")) if assignment.content_id else None
+        if content and published and not content.trashed_at: items.append({"assignment": assignment_data(assignment, db), "content": {"id": content.id, "name": content.name, "revision": version_data(published)}, "destination_type": assignment.destination_type})
+    return {"kind": "server_desired_state", "player": player_data(player), "layout": layout_data(layout) if layout else None, "eligible_assignments": sorted(items, key=lambda item: (item["assignment"]["position"], item["assignment"]["created_at"] or datetime.min.replace(tzinfo=UTC))), "generated_at": now}

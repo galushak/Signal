@@ -120,10 +120,42 @@ def test_admin_can_edit_and_delete_player(client):
     assert updated.status_code == 200
     assert updated.json()["name"] == "Cafeteria Display"
     assert updated.json()["enabled"] is False
-    assert test_client.delete(f"/api/v1/players/{ids['cafeteria']}", headers=headers).status_code == 204
+    removed = test_client.delete(f"/api/v1/players/{ids['cafeteria']}", headers=headers)
+    assert removed.status_code == 200
+    assert removed.json()["ok"] is True
     assert ids["cafeteria"] not in {
         player["id"]
         for player in test_client.get("/api/v1/players", headers=headers).json()
     }
     events = test_client.get("/api/v1/audit", headers=headers).json()
-    assert "player.deleted" in {event["action"] for event in events}
+    assert "player.archived" in {event["action"] for event in events}
+
+
+def test_archiving_enrolled_player_revokes_access_and_preserves_history(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    prepared = test_client.post(
+        "/api/v1/players/prepare-enrollment",
+        headers=headers,
+        json={"name": "Archive Me", "building_id": ids["high"], "enabled": True},
+    ).json()
+    credentials = test_client.post(
+        "/api/v1/device/enroll",
+        json={"code": prepared["enrollment"]["code"], "device_identifier": "archive-device-001"},
+    ).json()
+    player_id = prepared["player"]["id"]
+    assert test_client.delete(f"/api/v1/players/{player_id}", headers=headers).status_code == 200
+    device_headers = {
+        "X-Signal-Player-ID": credentials["player_id"],
+        "X-Signal-Player-Secret": credentials["device_secret"],
+    }
+    assert test_client.get("/api/v1/player-agent/manifest", headers=device_headers).status_code == 401
+    assert player_id not in {item["id"] for item in test_client.get("/api/v1/players", headers=headers).json()}
+    events = test_client.get("/api/v1/audit", headers=headers).json()
+    assert any(event["action"] == "player.archived" and event["resource_id"] == player_id for event in events)
+
+
+def test_unauthorized_player_removal_is_denied(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'kitchen')}"}
+    assert test_client.delete(f"/api/v1/players/{ids['cafeteria']}", headers=headers).status_code == 403
