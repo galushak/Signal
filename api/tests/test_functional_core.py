@@ -102,3 +102,28 @@ def test_admin_can_create_building_and_manual_player_with_audit(client):
     assert player.json()["health_state"] == "never_connected"
     events = test_client.get("/api/v1/audit", headers=headers).json()
     assert {"building.created", "player.created"}.issubset({event["action"] for event in events})
+
+
+def test_admin_can_edit_and_delete_player(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    updated = test_client.patch(
+        f"/api/v1/players/{ids['cafeteria']}",
+        headers=headers,
+        json={
+            "name": "Cafeteria Display",
+            "building_id": ids["high"],
+            "description": "Serving line",
+            "enabled": False,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Cafeteria Display"
+    assert updated.json()["enabled"] is False
+    assert test_client.delete(f"/api/v1/players/{ids['cafeteria']}", headers=headers).status_code == 204
+    assert ids["cafeteria"] not in {
+        player["id"]
+        for player in test_client.get("/api/v1/players", headers=headers).json()
+    }
+    events = test_client.get("/api/v1/audit", headers=headers).json()
+    assert "player.deleted" in {event["action"] for event in events}

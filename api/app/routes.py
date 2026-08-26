@@ -327,6 +327,23 @@ def update_player(player_id: str, payload: PlayerInput, request: Request, user: 
     db.commit(); db.refresh(player); return player_data(player)
 
 
+@router.delete("/players/{player_id}", status_code=204)
+def delete_player(player_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    player = db.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    require(user, "manage_players", PLAYER, player.id, db)
+    # Clear related operational records before removing the display. The
+    # immutable audit-event log retains the administrative deletion record.
+    for enrollment in db.scalars(select(PlayerEnrollment).where(PlayerEnrollment.player_id == player.id)).all():
+        db.delete(enrollment)
+    for command in db.scalars(select(PlayerCommand).where(PlayerCommand.player_id == player.id)).all():
+        db.delete(command)
+    record(db, actor=user, action="player.deleted", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request))
+    db.delete(player)
+    db.commit()
+
+
 ENROLLMENT_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 

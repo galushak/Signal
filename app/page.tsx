@@ -34,6 +34,9 @@ type Player = {
   building_name: string;
   description?: string;
   enabled: boolean;
+  layout_id?: string | null;
+  enrollment_status: string;
+  resolution?: string | null;
   health_state: string;
   last_seen_at?: string;
   cache_state: string;
@@ -726,6 +729,7 @@ function PlayersView({
   const [players, setPlayers] = useState<Player[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [showEnrollment, setShowEnrollment] = useState(false);
+  const [editingPlayer, setEditingPlayer] = useState<Player | null>(null);
   const [error, setError] = useState("");
   const reload = useCallback(
     () =>
@@ -739,6 +743,8 @@ function PlayersView({
   );
   useEffect(() => {
     reload();
+    const interval = window.setInterval(reload, 10_000);
+    return () => window.clearInterval(interval);
   }, [reload]);
   const add = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -761,6 +767,22 @@ function PlayersView({
       reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to create player.");
+    }
+  };
+  const deletePlayer = async (player: Player) => {
+    if (
+      !window.confirm(
+        `Delete ${player.name}? This removes its enrollment and cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await request(`/players/${player.id}`, token, { method: "DELETE" });
+      notify(`${player.name} was deleted.`);
+      reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unable to delete player.");
     }
   };
   return (
@@ -799,12 +821,14 @@ function PlayersView({
       </details>
       {error && <ErrorState message={error} />}
       {!error && (
-        <section className="panel functional-panel">
-          <div className="table-head">
-            <span>PLAYER</span>
+        <section className="panel functional-panel player-table">
+          <div className="table-head player-table-head">
+            <span>DISPLAY</span>
             <span>BUILDING</span>
-            <span>STATUS</span>
+            <span>ENROLLMENT</span>
+            <span>CONNECTION</span>
             <span>CACHE</span>
+            <span>ACTIONS</span>
           </div>
           {players.length ? (
             players.map((player) => (
@@ -818,20 +842,51 @@ function PlayersView({
                 <span>{player.building_name}</span>
                 <span
                   className={
-                    player.health_state === "never_connected"
+                    player.enrollment_status === "enrolled"
+                      ? "state published"
+                      : player.enrollment_status === "pending"
                       ? "state scheduled"
                       : "state published"
                   }
                 >
-                  {player.health_state === "never_connected"
-                    ? "Never connected"
-                    : player.health_state === "waiting_for_enrollment"
-                      ? "Waiting for enrollment"
-                      : player.health_state === "not_enrolled"
-                        ? "Not enrolled"
-                        : player.health_state}
+                  {player.enrollment_status === "enrolled"
+                    ? "Enrolled"
+                    : player.enrollment_status === "pending"
+                      ? "Awaiting code"
+                      : "Not enrolled"}
+                </span>
+                <span
+                  className={
+                    player.health_state === "online"
+                      ? "state published"
+                      : "state scheduled"
+                  }
+                >
+                  {player.health_state === "online"
+                    ? "Online"
+                    : player.health_state === "offline"
+                      ? "Offline"
+                      : player.health_state === "waiting_for_enrollment"
+                        ? "Waiting for enrollment"
+                        : player.health_state === "not_enrolled"
+                          ? "Not enrolled"
+                          : "Waiting for first heartbeat"}
                 </span>
                 <span>{player.cache_state}</span>
+                <span className="player-actions">
+                  <button
+                    className="table-action"
+                    onClick={() => setEditingPlayer(player)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="table-action danger"
+                    onClick={() => deletePlayer(player)}
+                  >
+                    Delete
+                  </button>
+                </span>
               </div>
             ))
           ) : (
@@ -849,7 +904,104 @@ function PlayersView({
           }}
         />
       )}
+      {editingPlayer && (
+        <PlayerEditorDialog
+          player={editingPlayer}
+          buildings={buildings}
+          token={token}
+          onClose={() => setEditingPlayer(null)}
+          onSaved={(name) => {
+            setEditingPlayer(null);
+            notify(`${name} was updated.`);
+            reload();
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function PlayerEditorDialog({
+  player,
+  buildings,
+  token,
+  onClose,
+  onSaved,
+}: {
+  player: Player;
+  buildings: Building[];
+  token: string;
+  onClose: () => void;
+  onSaved: (name: string) => void;
+}) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const save = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") || "").trim();
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/players/${player.id}`, token, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name,
+          building_id: form.get("building_id"),
+          description: form.get("description") || null,
+          enabled: form.get("enabled") === "on",
+          resolution: player.resolution || null,
+          layout_id: player.layout_id || null,
+        }),
+      });
+      onSaved(name);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to update player.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="edit-player-title">
+        <header>
+          <div>
+            <p className="eyebrow">DISPLAYS</p>
+            <h2 id="edit-player-title">Edit Display</h2>
+          </div>
+          <button className="close" aria-label="Close" onClick={onClose}>×</button>
+        </header>
+        <form onSubmit={save}>
+          <label>
+            Display name
+            <input name="name" required defaultValue={player.name} autoFocus />
+          </label>
+          <label>
+            Building
+            <select name="building_id" required defaultValue={player.building_id}>
+              {buildings.map((item) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Location <small>(optional)</small>
+            <input name="description" defaultValue={player.description || ""} />
+          </label>
+          <label className="checkbox-label">
+            <input name="enabled" type="checkbox" defaultChecked={player.enabled} />
+            Display is enabled
+          </label>
+          {error && <p className="enrollment-error">{error}</p>}
+          <footer>
+            <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
+            <button className="primary" disabled={busy}>{busy ? "Saving…" : "Save changes"}</button>
+          </footer>
+        </form>
+      </section>
+    </div>
   );
 }
 

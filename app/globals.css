@@ -1639,7 +1639,49 @@ small,
   object-fit: cover;
 }
 .player-line {
-  grid-template-columns: minmax(220px, 2fr) 1fr 150px 100px;
+  grid-template-columns: minmax(220px, 2fr) minmax(110px, 1fr) minmax(115px, 1fr) minmax(135px, 1.15fr) 85px minmax(110px, auto);
+}
+.player-table {
+  overflow-x: auto;
+}
+.player-table-head,
+.player-table .player-line {
+  min-width: 900px;
+}
+.player-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.table-action {
+  border: 0;
+  border-radius: 6px;
+  background: #efedfb;
+  color: #5942b4;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.table-action:hover {
+  background: #dfdbfa;
+}
+.table-action.danger {
+  background: #fff0ef;
+  color: #ad453f;
+}
+.table-action.danger:hover {
+  background: #ffdeda;
+}
+.checkbox-label {
+  display: flex !important;
+  align-items: center;
+  gap: 9px;
+}
+.enrollment-modal .checkbox-label input {
+  width: auto;
+  margin: 0;
 }
 .simple-line {
   grid-template-columns: minmax(220px, 1fr) auto;
