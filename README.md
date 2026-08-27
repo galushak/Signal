@@ -31,25 +31,31 @@ docker compose ps
 The console is available at `http://localhost:3000` and the API health check at
 `http://localhost:8000/healthz` only from the Compose network by default.
 
+Open Signal in your browser and complete the first-run setup wizard. It asks
+for your organization name and creates the first Super Admin without requiring
+shell or database access.
+
 To start the outbound tunnel after adding its token to `.env`:
 
 ```bash
 docker compose --profile tunnel up -d
 ```
 
-## First Super Admin
+## Recovery / Advanced Administration
 
-After the API finishes its automatic Alembic migration, create the first
-administrator exactly once. Signal does not ship a default password.
+The CLI bootstrap remains available for emergency recovery, headless installs,
+and testing. It creates the first administrator and marks setup as completed,
+so a CLI-bootstrapped installation will not later show the browser wizard.
 
 ```bash
 docker compose exec api python -m app.bootstrap \
   --username admin \
   --display-name "Signal Administrator" \
-  --password "use-a-long-unique-password"
+  --password "UseAUnique#Password1"
 ```
 
-Sign in at `http://localhost:3000` with those credentials. A Super Admin
+New passwords must be at least 8 characters and contain an uppercase letter,
+a number, and a special character. A Super Admin
 bypasses scoped permissions; all other access is granted by capability at
 District, Building, or Player scope and evaluated by the API.
 

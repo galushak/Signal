@@ -12,6 +12,7 @@ type User = {
   id: string;
   username: string;
   display_name: string;
+  enabled: boolean;
   super_admin: boolean;
   grants: Grant[];
 };
@@ -124,6 +125,15 @@ type Dashboard = {
   media_total: number;
   warnings: { player: Player }[];
 };
+type SetupStatus = {
+  setup_required: boolean;
+  organization_name: string | null;
+};
+type AppSettings = {
+  organization_name: string;
+  timezone: string;
+  default_slide_duration_seconds: number;
+};
 
 function AuthenticatedThumbnail({ thumbnailUrl, token, label, alt, fit = "cover" }: { thumbnailUrl?: string; token: string; label: string; alt: string; fit?: "contain" | "cover" }) {
   const [source, setSource] = useState<string | null>(null);
@@ -216,38 +226,61 @@ function designFor(template: string): DesignDocument {
   };
 }
 
-async function request(
+async function request<T = any>(
   path: string,
   token?: string,
   options: RequestInit = {},
-) {
+) : Promise<T> {
   const headers = new Headers(options.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (options.body && !(options.body instanceof FormData))
     headers.set("Content-Type", "application/json");
   const response = await fetch(`${API}${path}`, { ...options, headers });
-  const body =
+  const body: any =
     response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok)
     throw new Error(typeof body?.detail === "string" ? body.detail : body?.detail?.message || "Something went wrong. Please try again.");
-  return body;
+  return body as T;
 }
 
 export default function Home() {
+  return <SignalApp />;
+}
+
+export function SignalApp() {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
+  const [setupError, setSetupError] = useState("");
   const [view, setView] = useState("dashboard");
   const [libraryDesignId, setLibraryDesignId] = useState<string | null>(null);
   const [managedPlayerId, setManagedPlayerId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   useEffect(() => {
+    request("/setup/status")
+      .then(setSetupStatus)
+      .catch((reason) =>
+        setSetupError(
+          reason instanceof Error
+            ? reason.message
+            : "Unable to reach Signal. Check the server address and network connection.",
+        ),
+      );
+  }, []);
+  useEffect(() => {
+    if (!setupStatus || setupStatus.setup_required) return;
     const saved = localStorage.getItem("signal_token");
     if (saved)
       request("/auth/me", saved)
         .then(setUser)
         .then(() => setToken(saved))
         .catch(() => localStorage.removeItem("signal_token"));
-  }, []);
+  }, [setupStatus]);
+  useEffect(() => {
+    if (!setupStatus) return;
+    const target = setupStatus.setup_required ? "/setup" : token && user ? "/" : "/login";
+    if (window.location.pathname !== target) window.history.replaceState({}, "", target);
+  }, [setupStatus, token, user]);
   const openLibraryDesign = useCallback((id: string) => {
     setLibraryDesignId(id);
     setView("content");
@@ -266,9 +299,34 @@ export default function Home() {
     setUser(null);
     setView("dashboard");
   };
+  if (setupError)
+    return (
+      <main className="loading-screen">
+        <section className="login-card">
+          <div className="brand"><span className="brand-mark">S</span><span>Signal</span></div>
+          <h1>Unable to reach Signal</h1>
+          <p>{setupError}</p>
+        </section>
+      </main>
+    );
+  if (!setupStatus)
+    return <main className="loading-screen">Loading Signal…</main>;
+  if (setupStatus.setup_required)
+    return (
+      <Setup
+        onComplete={(result) => {
+          localStorage.setItem("signal_token", result.access_token);
+          setSetupStatus({ setup_required: false, organization_name: result.settings.organization_name });
+          setToken(result.access_token);
+          setUser(result.user);
+          setView("dashboard");
+        }}
+      />
+    );
   if (!token || !user)
     return (
       <Login
+        organizationName={setupStatus.organization_name || ""}
         onLogin={(nextToken, nextUser) => {
           localStorage.setItem("signal_token", nextToken);
           setToken(nextToken);
@@ -276,6 +334,8 @@ export default function Home() {
         }}
       />
     );
+  const organizationName = setupStatus.organization_name || "Signal";
+  const canManageSettings = user.super_admin || user.grants.some((grant) => grant.capability === "manage_settings" && grant.scope_type === "district");
   const show = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 4000);
@@ -291,6 +351,7 @@ export default function Home() {
       ["users", "♙", "Users & access"],
       ["audit", "◷", "Audit log"],
     );
+  if (canManageSettings) navigation.push(["settings", "⚙", "Settings"]);
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -299,10 +360,10 @@ export default function Home() {
           <span>Signal</span>
         </div>
         <div className="district">
-          <span className="district-badge">WC</span>
+          <span className="district-badge">{organizationName.slice(0, 2).toUpperCase()}</span>
           <div>
-            <b>West Creek</b>
-            <small>School District</small>
+            <b title={organizationName}>{organizationName}</b>
+            <small>Organization</small>
           </div>
         </div>
         <nav>
@@ -351,7 +412,7 @@ export default function Home() {
             ))}
           </select>
           <div className="breadcrumb">
-            West Creek <span>/</span>{" "}
+            {organizationName} <span>/</span>{" "}
             {view === "users"
               ? "Users & access"
               : view[0].toUpperCase() + view.slice(1)}
@@ -402,6 +463,7 @@ export default function Home() {
           {view === "layouts" && <LayoutsView token={token} notify={show} />}
           {view === "users" && <UsersView token={token} notify={show} />}
           {view === "audit" && <AuditView token={token} />}
+          {view === "settings" && canManageSettings && <SettingsView token={token} onSaved={(next) => { setSetupStatus({ setup_required: false, organization_name: next.organization_name }); show("Settings saved."); }} />}
         </div>
       </section>
       {notice && (
@@ -414,7 +476,61 @@ export default function Home() {
   );
 }
 
-function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
+function passwordChecks(password: string) {
+  return [
+    [password.length >= 8, "8 or more characters"],
+    [/[A-Z]/.test(password), "One uppercase letter"],
+    [/[0-9]/.test(password), "One number"],
+    [/[^A-Za-z0-9]/.test(password), "One special character"],
+  ] as const;
+}
+
+function PasswordRequirements({ password }: { password: string }) {
+  return <div className="password-requirements"><b>Password requirements</b>{passwordChecks(password).map(([valid, label]) => <span key={label} className={valid ? "valid" : ""}>{valid ? "✓" : "○"} {label}</span>)}</div>;
+}
+
+type SetupResult = { access_token: string; user: User; settings: AppSettings };
+
+function Setup({ onComplete }: { onComplete: (result: SetupResult) => void }) {
+  const [organizationName, setOrganizationName] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError("");
+    if (password !== confirmation) { setError("Passwords do not match."); return; }
+    if (passwordChecks(password).some(([valid]) => !valid)) { setError("Choose a password that meets every listed requirement."); return; }
+    setBusy(true);
+    try {
+      const result = await request("/setup", undefined, { method: "POST", body: JSON.stringify({ organization_name: organizationName, display_name: displayName, username, password, password_confirmation: confirmation }) });
+      onComplete(result);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to set up Signal.");
+    } finally { setBusy(false); }
+  };
+  return <main className="login-screen"><section className="login-card setup-card">
+    <div className="brand"><span className="brand-mark">S</span><span>Signal</span></div>
+    <p className="eyebrow">WELCOME TO SIGNAL</p>
+    <h1>Let’s set up your signage system.</h1>
+    <p>Start with your organization and the administrator who will manage Signal.</p>
+    <form onSubmit={submit}>
+      <label>Organization / School Name<input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} autoComplete="organization" required /></label>
+      <label>Display Name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" required /></label>
+      <label>Username<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required /></label>
+      <label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="new-password" required /></label>
+      <PasswordRequirements password={password} />
+      <label>Confirm Password<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} type="password" autoComplete="new-password" required /></label>
+      {error && <p className="form-error">{error}</p>}
+      <button className="primary login-button" disabled={busy}>{busy ? "Setting up Signal…" : "Set Up Signal"}</button>
+    </form>
+  </section></main>;
+}
+
+function Login({ onLogin, organizationName }: { onLogin: (token: string, user: User) => void; organizationName: string }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -443,6 +559,7 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
           <span>Signal</span>
         </div>
         <p className="eyebrow">DIGITAL SIGNAGE</p>
+        {organizationName && <p className="organization-brand" title={organizationName}>{organizationName}</p>}
         <h1>Welcome back</h1>
         <p>Sign in to manage your assigned displays and media.</p>
         <form onSubmit={submit}>
@@ -832,7 +949,7 @@ function SendToDisplayDialog({
           body: JSON.stringify({
             destination_type: destinationType,
             destination_id: destinationId,
-            duration_seconds: Number(form.get("duration_seconds") || 20),
+            duration_seconds: form.get("duration_seconds") ? Number(form.get("duration_seconds")) : null,
             transition: form.get("transition"),
             priority: Number(form.get("priority")),
             display_mode: form.get("display_mode") || "fit",
@@ -865,7 +982,7 @@ function SendToDisplayDialog({
             </select>
           </label>
           <div className="playback-fields">
-            <label>Duration<input name="duration_seconds" type="number" min="1" max="3600" defaultValue="20" /> seconds</label>
+            <label>Duration<input name="duration_seconds" type="number" min="1" max="3600" placeholder="Signal default" /> seconds</label>
             <label>Transition<select name="transition" defaultValue="fade"><option value="fade">Fade</option><option value="none">None</option><option value="slide">Slide</option></select></label>
             <label>Priority<select name="priority" defaultValue="1"><option value="1">Normal</option><option value="2">Elevated</option><option value="3">High</option></select></label>
           </div>
@@ -2512,6 +2629,7 @@ function UsersView({
   const [players, setPlayers] = useState<Player[]>([]);
   const [scopeType, setScopeType] = useState("building");
   const [error, setError] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const reload = useCallback(
     () =>
       Promise.all([
@@ -2534,6 +2652,10 @@ function UsersView({
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
+    if (passwordChecks(newPassword).some(([valid]) => !valid)) {
+      setError("Choose a password that meets every listed requirement.");
+      return;
+    }
     try {
       await request("/users", token, {
         method: "POST",
@@ -2547,6 +2669,7 @@ function UsersView({
       });
       notify("User created. Give them access below once they have a scope.");
       formElement.reset();
+      setNewPassword("");
       reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to create user.");
@@ -2596,11 +2719,11 @@ function UsersView({
   };
   const reset = async (item: User) => {
     const password = window.prompt(
-      `Set a new temporary password for ${item.display_name} (12+ characters):`,
+      `Set a new temporary password for ${item.display_name}. It must have 8+ characters, an uppercase letter, number, and special character:`,
     );
     if (!password) return;
-    if (password.length < 12) {
-      setError("Use a password with at least 12 characters.");
+    if (passwordChecks(password).some(([valid]) => !valid)) {
+      setError("Password must be at least 8 characters and include an uppercase letter, a number, and a special character.");
       return;
     }
     try {
@@ -2631,10 +2754,12 @@ function UsersView({
           <input
             name="password"
             type="password"
-            minLength={12}
-            placeholder="Temporary password (12+ characters)"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+            placeholder="Temporary password"
             required
           />
+          <PasswordRequirements password={newPassword} />
           <button className="secondary-button">Create user</button>
         </form>
       </section>
@@ -2747,6 +2872,33 @@ function UsersView({
     </>
   );
 }
+function SettingsView({ token, onSaved }: { token: string; onSaved: (settings: AppSettings) => void }) {
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { request("/settings", token).then(setSettings).catch((reason) => setError(reason instanceof Error ? reason.message : "Unable to load settings.")); }, [token]);
+  const save = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true); setError("");
+    try {
+      const next = await request("/settings", token, { method: "PATCH", body: JSON.stringify({ organization_name: form.get("organization_name"), timezone: form.get("timezone"), default_slide_duration_seconds: Number(form.get("default_slide_duration_seconds")) }) });
+      setSettings(next); onSaved(next);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to save settings."); }
+    finally { setBusy(false); }
+  };
+  if (error && !settings) return <ErrorState message={error} />;
+  if (!settings) return <Loading />;
+  return <><div className="page-title"><div><p className="eyebrow">ADMINISTRATION</p><h1>Settings</h1><p>Keep Signal’s organization and playback defaults up to date.</p></div></div>
+    <section className="panel settings-panel"><form onSubmit={save} className="settings-form">
+      <div><h2>General</h2><label>Organization Name<input name="organization_name" defaultValue={settings.organization_name} required maxLength={160} /></label></div>
+      <div><h2>Playback Defaults</h2><label>Default Slide Duration<input name="default_slide_duration_seconds" type="number" min="1" max="3600" defaultValue={settings.default_slide_duration_seconds} /> seconds</label></div>
+      <div><h2>Regional</h2><label>Timezone<input name="timezone" defaultValue={settings.timezone} placeholder="America/New_York" required /><small>Use an IANA timezone ID.</small></label></div>
+      {error && <p className="form-error">{error}</p>}
+      <div className="button-row"><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save Changes"}</button>{!busy && <small>Changes apply immediately.</small>}</div>
+    </form></section></>;
+}
+
 function AuditView({ token }: { token: string }) {
   const [items, setItems] = useState<
     { id: string; timestamp: string; action: string; resource_name?: string }[]

@@ -20,6 +20,28 @@ _attempts: dict[str, list[datetime]] = defaultdict(list)
 _enrollment_attempts: dict[str, list[datetime]] = defaultdict(list)
 _lock = Lock()
 
+PASSWORD_POLICY_MESSAGE = "Password must be at least 8 characters and include an uppercase letter, a number, and a special character."
+
+
+def password_policy_error(password: str) -> str | None:
+    """Return a user-safe reason when a newly chosen password is unacceptable."""
+    if len(password) < 8:
+        return PASSWORD_POLICY_MESSAGE
+    if not any("A" <= character <= "Z" for character in password):
+        return PASSWORD_POLICY_MESSAGE
+    if not any("0" <= character <= "9" for character in password):
+        return PASSWORD_POLICY_MESSAGE
+    if not any(not ("A" <= character <= "Z" or "a" <= character <= "z" or "0" <= character <= "9") for character in password):
+        return PASSWORD_POLICY_MESSAGE
+    return None
+
+
+def require_valid_new_password(password: str) -> None:
+    if len(password) > 256:
+        raise HTTPException(status_code=422, detail="Password must be 256 characters or fewer.")
+    if error := password_policy_error(password):
+        raise HTTPException(status_code=422, detail=error)
+
 
 def utc_datetime(value: datetime) -> datetime:
     """Treat database timestamps without an offset as UTC.

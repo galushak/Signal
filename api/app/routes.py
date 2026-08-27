@@ -1,20 +1,24 @@
 import secrets
+import re
 from html import escape
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import auth
 from .audit import record
 from .authorization import BUILDING, DISTRICT, PLAYER, ZONE, allowed, require, visible_building_ids, visible_player_ids
+from .bootstrap import ensure_full_screen_layout
 from .database import get_db
-from .models import AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, PlayerCommand, PlayerEnrollment, Tag, User, Zone
+from .models import AppSettings, AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, PlayerCommand, PlayerEnrollment, Tag, User, Zone
 from .player_protocol import MANIFEST_SCHEMA, _asset_ids, build_manifest, media_is_allowed
 from .settings import get_settings
 from .worker import prepare_media
@@ -32,13 +36,13 @@ class LoginInput(BaseModel):
 
 
 class PasswordInput(BaseModel):
-    password: str = Field(min_length=12, max_length=256)
+    password: str = Field(max_length=256)
 
 
 class UserInput(BaseModel):
     username: str = Field(min_length=3, max_length=80, pattern=r"^[a-zA-Z0-9._-]+$")
     display_name: str = Field(min_length=1, max_length=160)
-    password: str = Field(min_length=12, max_length=256)
+    password: str = Field(max_length=256)
     enabled: bool = True
     super_admin: bool = False
 
@@ -47,6 +51,20 @@ class UserUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=160)
     enabled: bool | None = None
     super_admin: bool | None = None
+
+
+class SetupInput(BaseModel):
+    organization_name: str = Field(max_length=160)
+    display_name: str = Field(max_length=160)
+    username: str = Field(max_length=80)
+    password: str = Field(max_length=256)
+    password_confirmation: str = Field(max_length=256)
+
+
+class SettingsUpdate(BaseModel):
+    organization_name: str | None = Field(default=None, max_length=160)
+    timezone: str | None = Field(default=None, max_length=64)
+    default_slide_duration_seconds: int | None = Field(default=None, ge=1, le=3600)
 
 
 class GrantInput(BaseModel):
@@ -190,6 +208,44 @@ def user_data(user: User, db: Session | None = None) -> dict:
     return {"id": user.id, "username": user.username, "display_name": user.display_name, "enabled": user.enabled, "super_admin": user.super_admin, "last_login_at": user.last_login_at, "created_at": user.created_at, "grants": grants}
 
 
+def settings_data(item: AppSettings) -> dict:
+    return {
+        "organization_name": item.organization_name,
+        "timezone": item.timezone,
+        "default_slide_duration_seconds": item.default_slide_duration_seconds,
+    }
+
+
+def application_settings(db: Session) -> AppSettings | None:
+    """Read the singleton, safely repairing pre-migration user-only installs."""
+    item = db.get(AppSettings, 1)
+    if item is None and db.scalar(select(User.id).limit(1)):
+        item = AppSettings(id=1, organization_name="Signal", timezone="UTC", default_slide_duration_seconds=20, setup_completed_at=datetime.now(UTC))
+        db.add(item)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            item = db.get(AppSettings, 1)
+    return item
+
+
+def clean_text(value: str, field_name: str, maximum: int) -> str:
+    result = value.strip()
+    if not result:
+        raise HTTPException(status_code=422, detail=f"{field_name} is required.")
+    if len(result) > maximum:
+        raise HTTPException(status_code=422, detail=f"{field_name} must be {maximum} characters or fewer.")
+    return result
+
+
+def normalized_username(value: str) -> str:
+    username = value.strip().lower()
+    if len(username) < 3 or len(username) > 80 or not re.fullmatch(r"[a-zA-Z0-9._-]+", username):
+        raise HTTPException(status_code=422, detail="Username must be 3–80 characters and use only letters, numbers, dots, underscores, or hyphens.")
+    return username
+
+
 def building_data(building: Building, db: Session | None = None) -> dict:
     data = {"id": building.id, "name": building.name, "description": building.description, "enabled": building.enabled, "created_at": building.created_at, "updated_at": building.updated_at}
     if db is not None:
@@ -247,6 +303,95 @@ def media_type_for(upload: UploadFile) -> str:
     raise HTTPException(status_code=415, detail="Use a JPEG, PNG, WebP, PDF, or video file.")
 
 
+@router.get("/setup/status")
+def setup_status(db: Session = Depends(get_db)):
+    item = application_settings(db)
+    completed = bool(item and item.setup_completed_at)
+    return {"setup_required": not completed, "organization_name": item.organization_name if completed else None}
+
+
+@router.post("/setup", status_code=201)
+def complete_setup(payload: SetupInput, request: Request, db: Session = Depends(get_db)):
+    """Atomically initialize a truly new Signal installation exactly once."""
+    organization_name = clean_text(payload.organization_name, "Organization name", 160)
+    display_name = clean_text(payload.display_name, "Display name", 160)
+    username = normalized_username(payload.username)
+    if payload.password != payload.password_confirmation:
+        raise HTTPException(status_code=422, detail="Passwords do not match.")
+    auth.require_valid_new_password(payload.password)
+    item = application_settings(db)
+    if item and item.setup_completed_at:
+        raise HTTPException(status_code=409, detail="Signal has already been set up. Please sign in.")
+    if db.scalar(select(User.id).limit(1)):
+        # A legacy install can reach this only if a settings record was somehow
+        # absent. Never offer a route to create an additional first admin.
+        if item is None:
+            item = AppSettings(id=1, organization_name="Signal", setup_completed_at=datetime.now(UTC))
+            db.add(item)
+        item.setup_completed_at = item.setup_completed_at or datetime.now(UTC)
+        db.commit()
+        raise HTTPException(status_code=409, detail="Signal has already been set up. Please sign in.")
+    if db.scalar(select(User.id).where(User.username == username)):
+        raise HTTPException(status_code=409, detail="That username is already in use.")
+    try:
+        if item is None:
+            item = AppSettings(id=1, organization_name=organization_name, timezone="UTC", default_slide_duration_seconds=20)
+            db.add(item)
+        else:
+            # Lock the singleton row when it exists. The database's fixed
+            # primary key protects the no-row race on a completely new install.
+            item = db.scalar(select(AppSettings).where(AppSettings.id == 1).with_for_update()) or item
+            if item.setup_completed_at:
+                raise HTTPException(status_code=409, detail="Signal has already been set up. Please sign in.")
+            item.organization_name = organization_name
+        user = User(username=username, display_name=display_name, password_hash=auth.hash_password(payload.password), enabled=True, super_admin=True)
+        db.add(user)
+        db.flush()
+        item.setup_completed_at = datetime.now(UTC)
+        ensure_full_screen_layout(db, user)
+        token, _ = auth.create_session(db, user)
+        user.last_login_at = datetime.now(UTC)
+        record(db, actor=user, action="user.created", resource_type="user", resource_id=user.id, resource_name=user.display_name, source_ip=auth.client_ip(request), metadata={"initial_super_admin": True})
+        record(db, actor=user, action="system.setup_completed", resource_type="app_settings", resource_id="1", resource_name=organization_name, source_ip=auth.client_ip(request), metadata={"organization_name": organization_name})
+        db.commit()
+        return {"access_token": token, "token_type": "bearer", "user": user_data(user, db), "settings": settings_data(item)}
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Signal has already been set up. Please sign in.")
+
+
+@router.get("/settings")
+def get_application_settings(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_settings", DISTRICT, None, db)
+    item = application_settings(db)
+    if item is None:
+        raise HTTPException(status_code=409, detail="Complete initial setup before changing Signal settings.")
+    return settings_data(item)
+
+
+@router.patch("/settings")
+def update_application_settings(payload: SettingsUpdate, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "manage_settings", DISTRICT, None, db)
+    item = application_settings(db)
+    if item is None:
+        raise HTTPException(status_code=409, detail="Complete initial setup before changing Signal settings.")
+    before = settings_data(item)
+    if payload.organization_name is not None:
+        item.organization_name = clean_text(payload.organization_name, "Organization name", 160)
+    if payload.timezone is not None:
+        try:
+            ZoneInfo(payload.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise HTTPException(status_code=422, detail="Choose a valid IANA timezone, such as America/New_York.") from exc
+        item.timezone = payload.timezone
+    if payload.default_slide_duration_seconds is not None:
+        item.default_slide_duration_seconds = payload.default_slide_duration_seconds
+    record(db, actor=user, action="system.settings_updated", resource_type="app_settings", resource_id="1", resource_name=item.organization_name, source_ip=auth.client_ip(request), metadata={"before": before, "after": settings_data(item)})
+    db.commit()
+    db.refresh(item)
+    return settings_data(item)
+
+
 @router.post("/auth/login")
 def login(payload: LoginInput, request: Request, db: Session = Depends(get_db)):
     username = payload.username.strip().lower()
@@ -278,6 +423,7 @@ def me(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db
 
 @router.post("/auth/change-password")
 def change_password(payload: PasswordInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    auth.require_valid_new_password(payload.password)
     user.password_hash = auth.hash_password(payload.password)
     record(db, actor=user, action="auth.password_changed", resource_type="user", resource_id=user.id, source_ip=auth.client_ip(request))
     db.commit()
@@ -615,9 +761,10 @@ def list_users(user: User = Depends(auth.get_current_user), db: Session = Depend
 @router.post("/users", status_code=201)
 def create_user(payload: UserInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     require(user, "manage_users", DISTRICT, None, db)
-    username = payload.username.lower()
+    username = normalized_username(payload.username)
+    auth.require_valid_new_password(payload.password)
     if db.scalar(select(User).where(User.username == username)): raise HTTPException(status_code=409, detail="That username is already in use.")
-    new_user = User(username=username, display_name=payload.display_name.strip(), password_hash=auth.hash_password(payload.password), enabled=payload.enabled, super_admin=payload.super_admin)
+    new_user = User(username=username, display_name=clean_text(payload.display_name, "Display name", 160), password_hash=auth.hash_password(payload.password), enabled=payload.enabled, super_admin=payload.super_admin)
     db.add(new_user); db.flush(); record(db, actor=user, action="user.created", resource_type="user", resource_id=new_user.id, resource_name=new_user.display_name, source_ip=auth.client_ip(request)); db.commit(); db.refresh(new_user); return user_data(new_user, db)
 
 
@@ -635,6 +782,7 @@ def update_user(target_id: str, payload: UserUpdate, request: Request, user: Use
 def reset_password(target_id: str, payload: PasswordInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     require(user, "manage_users", DISTRICT, None, db); target = db.get(User, target_id)
     if not target: raise HTTPException(status_code=404, detail="User not found.")
+    auth.require_valid_new_password(payload.password)
     target.password_hash = auth.hash_password(payload.password)
     db.query(auth.AuthSession).filter(auth.AuthSession.user_id == target.id).update({"revoked_at": datetime.now(UTC)})
     record(db, actor=user, action="user.password_reset", resource_type="user", resource_id=target.id, resource_name=target.display_name, source_ip=auth.client_ip(request)); db.commit(); return {"ok": True}
@@ -1223,7 +1371,10 @@ def create_assignment(content_id: str, payload: AssignmentInput, request: Reques
     if payload.weekdays and any(day not in range(7) for day in payload.weekdays): raise HTTPException(status_code=422, detail="Weekdays must be numbers from 0 (Monday) to 6 (Sunday).")
     max_position = db.scalar(select(func.max(ContentAssignment.position)).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id))
     position = max_position + 1 if max_position is not None else 0
-    assignment = ContentAssignment(content_id=item.id, source_type="content", position=position, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); refresh_desired_state(payload.destination_type, payload.destination_id, db); record(db, actor=user, action="assignment.sent_to_display", resource_type="assignment", resource_id=assignment.id, resource_name=item.name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"source_type": "design", "position": position}); db.commit(); return assignment_data(assignment, db)
+    values = payload.model_dump()
+    if values["duration_seconds"] is None:
+        values["duration_seconds"] = (application_settings(db) or AppSettings()).default_slide_duration_seconds
+    assignment = ContentAssignment(content_id=item.id, source_type="content", position=position, created_by_id=user.id, **values); db.add(assignment); db.flush(); refresh_desired_state(payload.destination_type, payload.destination_id, db); record(db, actor=user, action="assignment.sent_to_display", resource_type="assignment", resource_id=assignment.id, resource_name=item.name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"source_type": "design", "position": position}); db.commit(); return assignment_data(assignment, db)
 
 
 @router.post("/media/{asset_id}/assignments", status_code=201)
@@ -1238,7 +1389,10 @@ def create_media_assignment(asset_id: str, payload: AssignmentInput, request: Re
     if payload.display_mode not in {"fit", "fill"}: raise HTTPException(status_code=422, detail="Choose Fit to Display or Fill Display.")
     max_position = db.scalar(select(func.max(ContentAssignment.position)).where(ContentAssignment.destination_type == payload.destination_type, ContentAssignment.destination_id == payload.destination_id))
     position = max_position + 1 if max_position is not None else 0
-    assignment = ContentAssignment(media_asset_id=asset.id, source_type="media", position=position, created_by_id=user.id, **payload.model_dump()); db.add(assignment); db.flush(); refresh_desired_state(payload.destination_type, payload.destination_id, db); record(db, actor=user, action="assignment.sent_to_display", resource_type="assignment", resource_id=assignment.id, resource_name=asset.display_name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"source_type": asset.media_type, "position": position}); db.commit(); return assignment_data(assignment, db)
+    values = payload.model_dump()
+    if values["duration_seconds"] is None:
+        values["duration_seconds"] = (application_settings(db) or AppSettings()).default_slide_duration_seconds
+    assignment = ContentAssignment(media_asset_id=asset.id, source_type="media", position=position, created_by_id=user.id, **values); db.add(assignment); db.flush(); refresh_desired_state(payload.destination_type, payload.destination_id, db); record(db, actor=user, action="assignment.sent_to_display", resource_type="assignment", resource_id=assignment.id, resource_name=asset.display_name, scope_type=payload.destination_type, scope_id=payload.destination_id, source_ip=auth.client_ip(request), metadata={"source_type": asset.media_type, "position": position}); db.commit(); return assignment_data(assignment, db)
 
 
 @router.get("/content/{content_id}/assignments")

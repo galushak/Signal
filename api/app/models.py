@@ -16,6 +16,18 @@ class Timestamped:
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class AppSettings(Timestamped, Base):
+    """The single, user-facing configuration record for a Signal install."""
+
+    __tablename__ = "app_settings"
+    # A fixed primary key makes the singleton guarantee database-enforced.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    organization_name: Mapped[str] = mapped_column(String(160), default="Signal")
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    default_slide_duration_seconds: Mapped[int] = mapped_column(Integer, default=20)
+    setup_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class User(Timestamped, Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
