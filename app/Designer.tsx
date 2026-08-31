@@ -10,6 +10,7 @@ import {
   Text,
   Transformer,
 } from "react-konva";
+import { newClientId } from "./ids";
 
 export type DesignerElement = {
   id: string;
@@ -37,7 +38,7 @@ const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
 function makeElement(type: string, index: number): DesignerElement {
-  const id = crypto.randomUUID();
+  const id = newClientId();
   const x = 180 + (index % 5) * 40;
   const y = 170 + (index % 4) * 35;
   const presets: Record<string, Partial<DesignerElement>> = {
@@ -300,7 +301,7 @@ export function SignalDesigner({
       .filter((element) => !element.locked)
       .map((element) => ({
         ...element,
-        id: crypto.randomUUID(),
+        id: newClientId(),
         x: clamp(element.x + 32, 0, W - element.width),
         y: clamp(element.y + 32, 0, H - element.height),
         z_index: document.elements.length + 1,
@@ -317,7 +318,7 @@ export function SignalDesigner({
   const paste = () => {
     const copies = clipboard.current.map((element, index) => ({
       ...element,
-      id: crypto.randomUUID(),
+      id: newClientId(),
       x: clamp(element.x + 32, 0, W - element.width),
       y: clamp(element.y + 32, 0, H - element.height),
       z_index: document.elements.length + index + 1,

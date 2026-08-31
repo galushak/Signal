@@ -2716,6 +2716,12 @@ small,
 .page-title > .primary {
   align-self: center;
 }
+.library-create-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
 .enrollment-modal .primary {
   min-height: 38px;
   background: var(--purple);
@@ -2762,6 +2768,11 @@ small,
   display: block;
 }
 @media (max-width: 650px) {
+  .page-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 16px;
+  }
   .library-filter {
     display: block;
   }

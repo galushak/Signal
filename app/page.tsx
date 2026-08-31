@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { SignalDesigner, type DesignerDocument } from "./Designer";
+import { newClientId } from "./ids";
 
 const API =
   process.env.NEXT_PUBLIC_API_BASE ||
@@ -172,7 +173,7 @@ function designFor(template: string): DesignDocument {
     width: number,
     height: number,
   ): DesignElement => ({
-    id: crypto.randomUUID(),
+    id: newClientId(),
     type,
     text,
     x,
@@ -440,6 +441,7 @@ export function SignalApp() {
               token={token}
               notify={show}
               onOpenDesign={openLibraryDesign}
+              onCreateDesign={() => setView("content")}
             />
           )}
           {view === "players" && (
@@ -717,16 +719,19 @@ function MediaView({
   token,
   notify,
   onOpenDesign,
+  onCreateDesign,
 }: {
   token: string;
   notify: (m: string) => void;
   onOpenDesign: (id: string) => void;
+  onCreateDesign: () => void;
 }) {
   const [library, setLibrary] = useState<LibraryItem[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
   const [kind, setKind] = useState("all");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
   const [error, setError] = useState("");
   const [sendItem, setSendItem] = useState<LibraryItem | null>(null);
   const [trashItem, setTrashItem] = useState<LibraryItem | null>(null);
@@ -784,8 +789,21 @@ function MediaView({
             Images, video, PDFs, and editable Signal designs within your access.
           </p>
         </div>
+        <div className="library-create-actions">
+          <button className="secondary-button" onClick={onCreateDesign}>
+            + Create design
+          </button>
+          <button
+            className="primary"
+            aria-expanded={uploadOpen}
+            aria-controls="media-upload"
+            onClick={() => setUploadOpen((open) => !open)}
+          >
+            {uploadOpen ? "Close upload" : "+ Upload media"}
+          </button>
+        </div>
       </div>
-      <section className="panel upload-panel">
+      {uploadOpen && <section className="panel upload-panel" id="media-upload">
         <h2>Upload media</h2>
         <p>
           Images, PDFs, and video are stored safely and prepared in the
@@ -819,7 +837,7 @@ function MediaView({
             {busy ? "Uploading…" : "Upload media"}
           </button>
         </form>
-      </section>
+      </section>}
       <section className="panel library-filter">
         <input
           value={search}
@@ -2205,7 +2223,7 @@ function ContentView({
       elements: [
         ...prior.elements,
         {
-          id: crypto.randomUUID(),
+          id: newClientId(),
           type,
           text: labels[type],
           x: 180 + prior.elements.length * 30,
