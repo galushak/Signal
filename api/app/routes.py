@@ -1,5 +1,6 @@
 import secrets
 import re
+import uuid
 from html import escape
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
@@ -15,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from . import auth
 from .audit import record
-from .authorization import BUILDING, DISTRICT, PLAYER, ZONE, allowed, require, visible_building_ids, visible_player_ids
+from .authorization import ADMIN, BUILDING, DISTRICT, PLAYER, ROLES, SUPER_ADMIN, UPLOADER_CREATOR, USER, ZONE, allowed, normalized_role, require, visible_building_ids, visible_player_ids
 from .bootstrap import ensure_full_screen_layout
 from .database import get_db
 from .models import AppSettings, AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, PlayerCommand, PlayerEnrollment, Tag, User, Zone
@@ -44,13 +45,13 @@ class UserInput(BaseModel):
     display_name: str = Field(min_length=1, max_length=160)
     password: str = Field(max_length=256)
     enabled: bool = True
-    super_admin: bool = False
+    role: str = USER
 
 
 class UserUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=160)
     enabled: bool | None = None
-    super_admin: bool | None = None
+    role: str | None = None
 
 
 class SetupInput(BaseModel):
@@ -118,6 +119,12 @@ class HeartbeatInput(BaseModel):
 
 class CommandInput(BaseModel):
     command: str
+    resolution: str | None = Field(default=None, pattern=r"^\d{3,5}x\d{3,5}$")
+
+
+class WebLinkInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    url: str = Field(min_length=8, max_length=2048, pattern=r"^https?://")
 
 
 class CommandResultInput(BaseModel):
@@ -204,8 +211,8 @@ class FolderInput(BaseModel):
 
 
 def user_data(user: User, db: Session | None = None) -> dict:
-    grants = [] if db is None else [{"id": g.id, "capability": g.capability, "scope_type": g.scope_type, "scope_id": g.scope_id} for g in user.grants]
-    return {"id": user.id, "username": user.username, "display_name": user.display_name, "enabled": user.enabled, "super_admin": user.super_admin, "last_login_at": user.last_login_at, "created_at": user.created_at, "grants": grants}
+    role = normalized_role(user)
+    return {"id": user.id, "username": user.username, "display_name": user.display_name, "enabled": user.enabled, "role": role, "super_admin": role == SUPER_ADMIN, "last_login_at": user.last_login_at, "created_at": user.created_at}
 
 
 def settings_data(item: AppSettings) -> dict:
@@ -257,7 +264,7 @@ def player_data(player: Player, db: Session | None = None) -> dict:
     last_seen = auth.utc_datetime(player.last_seen_at) if player.last_seen_at else None
     state = "waiting_for_enrollment" if player.enrollment_status == "pending" else ("not_enrolled" if player.enrollment_status == "not_enrolled" else ("never_connected" if not last_seen else ("online" if datetime.now(UTC) - last_seen <= timedelta(seconds=75) else "offline")))
     runtime = player.runtime_data or {}
-    data = {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "archived_at": player.archived_at, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
+    data = {"id": player.id, "name": player.name, "building_id": player.building_id, "building_name": player.building.name, "description": player.description, "enabled": player.enabled, "archived_at": player.archived_at, "layout_id": player.layout_id, "enrollment_status": player.enrollment_status, "last_seen_at": player.last_seen_at, "software_version": player.software_version, "resolution": player.resolution, "connected_ip": runtime.get("source_ip"), "health_state": state, "cache_state": player.cache_state, "desired_state_revision": player.desired_state_revision, "applied_state_revision": player.applied_state_revision, "runtime": runtime, "created_at": player.created_at, "updated_at": player.updated_at}
     if db is not None:
         layout = effective_layout(player, db)
         data["effective_layout"] = {"id": layout.id, "name": layout.name, "system": bool(layout.system_key)}
@@ -344,7 +351,7 @@ def complete_setup(payload: SetupInput, request: Request, db: Session = Depends(
             if item.setup_completed_at:
                 raise HTTPException(status_code=409, detail="Signal has already been set up. Please sign in.")
             item.organization_name = organization_name
-        user = User(username=username, display_name=display_name, password_hash=auth.hash_password(payload.password), enabled=True, super_admin=True)
+        user = User(username=username, display_name=display_name, password_hash=auth.hash_password(payload.password), enabled=True, role=SUPER_ADMIN, super_admin=True)
         db.add(user)
         db.flush()
         item.setup_completed_at = datetime.now(UTC)
@@ -610,7 +617,7 @@ def issue_server_enrollment(player: Player, request: Request, user: User, db: Se
 
 
 def can_manage_any_display(user: User, db: Session) -> bool:
-    return user.super_admin or bool(db.scalar(select(PermissionGrant.id).where(PermissionGrant.user_id == user.id, PermissionGrant.capability == "manage_players")))
+    return allowed(user, "manage_players", DISTRICT, None, db)
 
 
 @router.get("/player-enrollments/options")
@@ -732,10 +739,15 @@ def queue_player_command(player_id: str, payload: CommandInput, request: Request
     player = db.get(Player, player_id)
     if not player or player.archived_at: raise HTTPException(status_code=404, detail="Player not found.")
     require(user, "restart_players", PLAYER, player.id, db)
-    if payload.command not in {"force_sync", "restart_renderer", "restart_player", "clear_cache", "screenshot"}:
+    if payload.command not in {"force_sync", "restart_renderer", "restart_player", "clear_cache", "screenshot", "set_resolution"}:
         raise HTTPException(status_code=422, detail="Unsupported player command.")
-    command = PlayerCommand(player_id=player.id, command=payload.command, requested_by_id=user.id)
-    db.add(command); db.flush(); record(db, actor=user, action="player.command_queued", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"command": payload.command}); db.commit()
+    if payload.command == "set_resolution" and not payload.resolution:
+        raise HTTPException(status_code=422, detail="Choose a resolution to apply.")
+    if payload.command != "set_resolution" and payload.resolution:
+        raise HTTPException(status_code=422, detail="A resolution is only valid for the resolution command.")
+    command_payload = {"resolution": payload.resolution} if payload.resolution else None
+    command = PlayerCommand(player_id=player.id, command=payload.command, payload=command_payload, requested_by_id=user.id)
+    db.add(command); db.flush(); record(db, actor=user, action="player.command_queued", resource_type="player", resource_id=player.id, resource_name=player.name, scope_type=PLAYER, scope_id=player.id, source_ip=auth.client_ip(request), metadata={"command": payload.command, **(command_payload or {})}); db.commit()
     return {"id": command.id, "status": command.status}
 
 
@@ -749,7 +761,7 @@ def player_command_status(player_id: str, command_id: str, user: User = Depends(
     command = db.get(PlayerCommand, command_id)
     if not command or command.player_id != player.id:
         raise HTTPException(status_code=404, detail="Command not found.")
-    return {"id": command.id, "command": command.command, "status": command.status, "result": command.result, "completed_at": command.completed_at}
+    return {"id": command.id, "command": command.command, "payload": command.payload, "status": command.status, "result": command.result, "completed_at": command.completed_at}
 
 
 @router.get("/users")
@@ -764,7 +776,9 @@ def create_user(payload: UserInput, request: Request, user: User = Depends(auth.
     username = normalized_username(payload.username)
     auth.require_valid_new_password(payload.password)
     if db.scalar(select(User).where(User.username == username)): raise HTTPException(status_code=409, detail="That username is already in use.")
-    new_user = User(username=username, display_name=clean_text(payload.display_name, "Display name", 160), password_hash=auth.hash_password(payload.password), enabled=payload.enabled, super_admin=payload.super_admin)
+    if payload.role not in ROLES:
+        raise HTTPException(status_code=422, detail="Choose a valid role.")
+    new_user = User(username=username, display_name=clean_text(payload.display_name, "Display name", 160), password_hash=auth.hash_password(payload.password), enabled=payload.enabled, role=payload.role, super_admin=payload.role == SUPER_ADMIN)
     db.add(new_user); db.flush(); record(db, actor=user, action="user.created", resource_type="user", resource_id=new_user.id, resource_name=new_user.display_name, source_ip=auth.client_ip(request)); db.commit(); db.refresh(new_user); return user_data(new_user, db)
 
 
@@ -774,7 +788,11 @@ def update_user(target_id: str, payload: UserUpdate, request: Request, user: Use
     if not target: raise HTTPException(status_code=404, detail="User not found.")
     if payload.display_name is not None: target.display_name = payload.display_name.strip()
     if payload.enabled is not None: target.enabled = payload.enabled
-    if payload.super_admin is not None: target.super_admin = payload.super_admin
+    if payload.role is not None:
+        if payload.role not in ROLES:
+            raise HTTPException(status_code=422, detail="Choose a valid role.")
+        target.role = payload.role
+        target.super_admin = payload.role == SUPER_ADMIN
     record(db, actor=user, action="user.updated", resource_type="user", resource_id=target.id, resource_name=target.display_name, source_ip=auth.client_ip(request)); db.commit(); db.refresh(target); return user_data(target, db)
 
 
@@ -790,19 +808,12 @@ def reset_password(target_id: str, payload: PasswordInput, request: Request, use
 
 @router.post("/users/{target_id}/grants", status_code=201)
 def add_grant(target_id: str, payload: GrantInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    require(user, "manage_permissions", DISTRICT, None, db)
-    if payload.capability not in CAPABILITIES: raise HTTPException(status_code=422, detail="That permission is not recognized.")
-    scope_valid(payload.scope_type, payload.scope_id, db); target = db.get(User, target_id)
-    if not target: raise HTTPException(status_code=404, detail="User not found.")
-    grant = PermissionGrant(user_id=target.id, capability=payload.capability, scope_type=payload.scope_type, scope_id=payload.scope_id)
-    db.add(grant); db.flush(); record(db, actor=user, action="permission.granted", resource_type="user", resource_id=target.id, resource_name=target.display_name, scope_type=payload.scope_type, scope_id=payload.scope_id, source_ip=auth.client_ip(request), metadata={"capability": payload.capability}); db.commit(); return {"id": grant.id}
+    raise HTTPException(status_code=410, detail="Permissions have been replaced by roles. Update the user's role instead.")
 
 
 @router.delete("/users/{target_id}/grants/{grant_id}")
 def remove_grant(target_id: str, grant_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    require(user, "manage_permissions", DISTRICT, None, db); grant = db.get(PermissionGrant, grant_id)
-    if not grant or grant.user_id != target_id: raise HTTPException(status_code=404, detail="Permission not found.")
-    db.delete(grant); record(db, actor=user, action="permission.removed", resource_type="user", resource_id=target_id, scope_type=grant.scope_type, scope_id=grant.scope_id, source_ip=auth.client_ip(request), metadata={"capability": grant.capability}); db.commit(); return {"ok": True}
+    raise HTTPException(status_code=410, detail="Permissions have been replaced by roles. Update the user's role instead.")
 
 
 @router.get("/folders")
@@ -885,7 +896,7 @@ def player_heartbeat(payload: HeartbeatInput, request: Request, db: Session = De
     player.health_state = "online"
     player.cache_state = payload.cache_state
     player.network_info = payload.network_state
-    player.runtime_data = {"renderer_status": payload.renderer_status, "current_content": payload.current_content, "uptime_seconds": payload.uptime_seconds, "disk_usage": payload.disk_usage, "temperature": payload.temperature}
+    player.runtime_data = {"renderer_status": payload.renderer_status, "current_content": payload.current_content, "uptime_seconds": payload.uptime_seconds, "disk_usage": payload.disk_usage, "temperature": payload.temperature, "source_ip": request.client.host if request.client else None}
     manifest = build_manifest(player, db)
     player.desired_state_revision = manifest["revision"]
     db.commit()
@@ -922,7 +933,7 @@ def poll_player_commands(request: Request, db: Session = Depends(get_db)):
     queued = db.scalars(select(PlayerCommand).where(PlayerCommand.player_id == player.id, PlayerCommand.status == "queued").order_by(PlayerCommand.created_at)).all()
     for command in queued: command.status = "delivered"
     db.commit()
-    return [{"id": command.id, "command": command.command} for command in queued]
+    return [{"id": command.id, "command": command.command, **({"payload": command.payload} if command.payload else {})} for command in queued]
 
 
 @router.post("/player-agent/commands/{command_id}/result")
@@ -1301,17 +1312,18 @@ def content_thumbnail(content_id: str, user: User = Depends(auth.get_current_use
 
 @router.get("/library")
 def unified_library(kind: str = "all", search: str | None = None, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    if kind not in {"all", "design", "image", "video", "pdf", "trash"}:
-        raise HTTPException(status_code=422, detail="Choose All, Designs, Images, Videos, PDFs, or Trash.")
+    if kind not in {"all", "design", "web", "image", "video", "pdf", "trash"}:
+        raise HTTPException(status_code=422, detail="Choose All, Designs, Web links, Images, Videos, PDFs, or Trash.")
     needle = (search or "").strip().lower()
     items = []
-    if kind in {"all", "design", "trash"}:
+    if kind in {"all", "design", "web", "trash"}:
         content_query = select(Content).where(Content.trashed_at.is_not(None) if kind == "trash" else Content.trashed_at.is_(None)).order_by(Content.updated_at.desc())
         for content in db.scalars(content_query):
-            if not allowed(user, "view", content.scope_type, content.scope_id, db) or needle and needle not in content.name.lower():
+            content_kind = "web" if content.content_type == "web_link" else "design"
+            if not allowed(user, "view", content.scope_type, content.scope_id, db) or kind not in {"all", "trash"} and content_kind != kind or needle and needle not in content.name.lower():
                 continue
             data = content_data(content, db)
-            items.append({"id": content.id, "kind": "design", "name": content.name, "status": "Trashed" if content.trashed_at else ("Published" if data["published_version"] else "Draft"), "trashed": bool(content.trashed_at), "updated_at": content.updated_at, "thumbnail_url": f"/api/v1/content/{content.id}/thumbnail.svg", "scope_type": content.scope_type, "scope_id": content.scope_id})
+            items.append({"id": content.id, "kind": content_kind, "name": content.name, "status": "Trashed" if content.trashed_at else ("Published" if data["published_version"] else "Draft"), "trashed": bool(content.trashed_at), "updated_at": content.updated_at, "thumbnail_url": f"/api/v1/content/{content.id}/thumbnail.svg", "scope_type": content.scope_type, "scope_id": content.scope_id})
     if kind in {"all", "image", "video", "pdf", "trash"}:
         asset_query = select(MediaAsset).where(MediaAsset.trashed_at.is_not(None) if kind == "trash" else MediaAsset.trashed_at.is_(None)).order_by(MediaAsset.created_at.desc())
         for asset in db.scalars(asset_query):
@@ -1326,6 +1338,27 @@ def unified_library(kind: str = "all", search: str | None = None, user: User = D
 def create_content(payload: ContentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     scope_valid(payload.scope_type, payload.scope_id, db); require(user, "create_content", payload.scope_type, payload.scope_id, db); valid_design(payload.design_document)
     item = Content(name=payload.name.strip(), content_type=payload.content_type, scope_type=payload.scope_type, scope_id=payload.scope_id, created_by_id=user.id); db.add(item); db.flush(); version = ContentVersion(content_id=item.id, revision=1, state="draft", design_document=payload.design_document, note=payload.note, created_by_id=user.id); db.add(version); record(db, actor=user, action="content.created", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request)); db.commit(); return content_data(item, db)
+
+
+@router.post("/content/web-link", status_code=201)
+def create_web_link(payload: WebLinkInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    """Create a published, full-screen website item for Library and playback."""
+    require(user, "create_content", DISTRICT, None, db)
+    require(user, "publish", DISTRICT, None, db)
+    name = clean_text(payload.name, "Name", 160)
+    url = payload.url.strip()
+    document = {
+        "schema": "signal.design/v1",
+        "canvas": {"width": 1920, "height": 1080, "background": "#000000"},
+        "elements": [{"id": str(uuid.uuid4()), "type": "website", "text": url, "x": 0, "y": 0, "width": 1920, "height": 1080, "z_index": 1}],
+    }
+    valid_design(document)
+    item = Content(name=name, content_type="web_link", scope_type=DISTRICT, scope_id=None, created_by_id=user.id)
+    db.add(item); db.flush()
+    db.add(ContentVersion(content_id=item.id, revision=1, state="published", design_document=document, note="Library web link", created_by_id=user.id))
+    record(db, actor=user, action="content.web_link_created", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=DISTRICT, scope_id=None, source_ip=auth.client_ip(request), metadata={"url": url})
+    db.commit()
+    return content_data(item, db)
 
 
 @router.get("/content/{content_id}/versions")
@@ -1473,7 +1506,7 @@ def reorder_player_assignments(player_id: str, payload: AssignmentReorderInput, 
 
 @router.get("/templates")
 def list_templates(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    if not user.super_admin and not db.scalars(select(PermissionGrant).where(PermissionGrant.user_id == user.id, PermissionGrant.capability == "create_content")).first(): raise HTTPException(status_code=403, detail="You don't have permission to create content.")
+    require(user, "create_content", DISTRICT, None, db)
     return [{"id": item.id, "name": item.name, "design_document": item.design_document, "enabled": item.enabled, "created_at": item.created_at} for item in db.scalars(select(ContentTemplate).where(ContentTemplate.trashed_at.is_(None), ContentTemplate.enabled.is_(True)).order_by(ContentTemplate.name))]
 
 

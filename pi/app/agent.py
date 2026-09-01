@@ -213,7 +213,7 @@ class PlayerAgent:
         renderer = getattr(self.platform, "renderer_status", lambda: "local_web_only")()
         self.runtime["renderer"] = renderer
         self._save_runtime()
-        payload = {"software_version": PLAYER_VERSION, "applied_state_revision": manifest.get("revision"), "renderer_status": renderer, "cache_state": self.runtime.get("cache", "empty"), "resolution": "1920x1080", "uptime_seconds": int(time.monotonic()), "disk_usage": self.platform.disk_usage(str(self.state_dir)), "network_state": self.platform.network_state(), "temperature": self.platform.temperature()}
+        payload = {"software_version": PLAYER_VERSION, "applied_state_revision": manifest.get("revision"), "renderer_status": renderer, "cache_state": self.runtime.get("cache", "empty"), "resolution": self.platform.resolution(), "uptime_seconds": int(time.monotonic()), "disk_usage": self.platform.disk_usage(str(self.state_dir)), "network_state": self.platform.network_state(), "temperature": self.platform.temperature()}
         self.client.post(f"{self.api_url}/player-agent/heartbeat", headers=self.headers(), json=payload).raise_for_status()
 
     def commands(self) -> None:
@@ -227,6 +227,7 @@ class PlayerAgent:
                     result = {"state": "synced" if changed else "already_up_to_date"}
                 elif command["command"] == "restart_renderer": status, result = self.platform.restart_renderer()
                 elif command["command"] == "clear_cache": shutil.rmtree(self.media_dir, ignore_errors=True); status, result = "completed", {"cache": "cleared"}
+                elif command["command"] == "set_resolution": status, result = self.platform.set_resolution((command.get("payload") or {}).get("resolution", ""))
                 else: status, result = "unsupported", {"reason": "not supported by this platform"}
             except Exception as exc:  # retain active manifest when commands fail
                 status, result = "failed", {"error": str(exc)}

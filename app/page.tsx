@@ -14,14 +14,8 @@ type User = {
   username: string;
   display_name: string;
   enabled: boolean;
+  role: "super_admin" | "admin" | "user" | "uploader_creator";
   super_admin: boolean;
-  grants: Grant[];
-};
-type Grant = {
-  id: string;
-  capability: string;
-  scope_type: string;
-  scope_id: string | null;
 };
 type Building = {
   id: string;
@@ -40,6 +34,7 @@ type Player = {
   layout_id?: string | null;
   enrollment_status: string;
   resolution?: string | null;
+  connected_ip?: string | null;
   health_state: string;
   last_seen_at?: string;
   cache_state: string;
@@ -111,7 +106,7 @@ type Media = {
 };
 type LibraryItem = {
   id: string;
-  kind: "design" | "image" | "video" | "pdf";
+  kind: "design" | "web" | "image" | "video" | "pdf";
   name: string;
   status: string;
   updated_at: string;
@@ -156,7 +151,7 @@ function AuthenticatedThumbnail({ thumbnailUrl, token, label, alt, fit = "cover"
 }
 
 function LibraryThumbnail({ item, token }: { item: LibraryItem; token: string }) {
-  const label = item.kind === "design" ? "DESIGN" : item.kind === "video" ? "▶ VIDEO" : item.kind === "pdf" ? "PDF" : "IMAGE";
+  const label = item.kind === "design" ? "DESIGN" : item.kind === "web" ? "WEB" : item.kind === "video" ? "▶ VIDEO" : item.kind === "pdf" ? "PDF" : "IMAGE";
   return <AuthenticatedThumbnail thumbnailUrl={item.thumbnail_url} token={token} label={label} alt={`Preview of ${item.name}`} />;
 }
 
@@ -336,7 +331,7 @@ export function SignalApp() {
       />
     );
   const organizationName = setupStatus.organization_name || "Signal";
-  const canManageSettings = user.super_admin || user.grants.some((grant) => grant.capability === "manage_settings" && grant.scope_type === "district");
+  const canManageSettings = user.role === "super_admin" || user.role === "admin";
   const show = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 4000);
@@ -347,7 +342,7 @@ export function SignalApp() {
     ["players", "▣", "Players"],
     ["buildings", "⌂", "Buildings"],
   ];
-  if (user.super_admin)
+  if (user.role === "super_admin")
     navigation.push(
       ["users", "♙", "Users & access"],
       ["audit", "◷", "Audit log"],
@@ -391,7 +386,7 @@ export function SignalApp() {
           </div>
           <div>
             <b>{user.display_name}</b>
-            <small>{user.super_admin ? "Super Admin" : "Publisher"}</small>
+            <small>{user.role === "uploader_creator" ? "Uploader / Creator" : user.role.replaceAll("_", " ")}</small>
           </div>
           <button onClick={logout} title="Sign out">
             ↪
@@ -732,6 +727,7 @@ function MediaView({
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [webLinkOpen, setWebLinkOpen] = useState(false);
   const [error, setError] = useState("");
   const [sendItem, setSendItem] = useState<LibraryItem | null>(null);
   const [trashItem, setTrashItem] = useState<LibraryItem | null>(null);
@@ -779,6 +775,23 @@ function MediaView({
       setBusy(false);
     }
   };
+  const createWebLink = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    setBusy(true);
+    try {
+      await request("/content/web-link", token, { method: "POST", body: JSON.stringify({ name: form.get("name"), url: form.get("url") }) });
+      notify("Web link added to Library and published.");
+      formElement.reset();
+      setWebLinkOpen(false);
+      reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to add web link.");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <>
       <div className="page-title">
@@ -792,6 +805,9 @@ function MediaView({
         <div className="library-create-actions">
           <button className="secondary-button" onClick={onCreateDesign}>
             + Create design
+          </button>
+          <button className="secondary-button" onClick={() => setWebLinkOpen((open) => !open)}>
+            {webLinkOpen ? "Close web link" : "+ Add web link"}
           </button>
           <button
             className="primary"
@@ -838,6 +854,15 @@ function MediaView({
           </button>
         </form>
       </section>}
+      {webLinkOpen && <section className="panel upload-panel">
+        <h2>Add web link</h2>
+        <p>Publish a full-screen HTTPS or HTTP page, including a Google Slides presentation that allows embedding.</p>
+        <form onSubmit={createWebLink} className="inline-form">
+          <input name="name" placeholder="e.g. Board presentation" required />
+          <input name="url" type="url" placeholder="https://docs.google.com/presentation/.../embed" required />
+          <button className="primary" disabled={busy}>{busy ? "Adding…" : "Add web link"}</button>
+        </form>
+      </section>}
       <section className="panel library-filter">
         <input
           value={search}
@@ -845,7 +870,7 @@ function MediaView({
           placeholder="Search designs, files, and tags"
         />
         <div className="button-row">
-          {["all", "design", "image", "video", "pdf", "trash"].map((item) => (
+          {["all", "design", "web", "image", "video", "pdf", "trash"].map((item) => (
             <button
               key={item}
               className={kind === item ? "primary" : "secondary-button"}
@@ -855,6 +880,8 @@ function MediaView({
                 ? "All"
                 : item === "design"
                   ? "Designs"
+                  : item === "web"
+                    ? "Web links"
                   : item === "trash" ? "Trash" : `${item[0].toUpperCase()}${item.slice(1)}s`}
             </button>
           ))}
@@ -873,6 +900,8 @@ function MediaView({
                 <small>
                   {asset.kind === "design"
                     ? `Design · ${asset.status}`
+                    : asset.kind === "web"
+                      ? `Web link · ${asset.status}`
                     : `${asset.kind} · ${asset.status}`}
                 </small>
                 {asset.kind === "design" && !asset.trashed && (
@@ -1188,7 +1217,7 @@ function LibraryPickerDialog({ token, onClose, onSelected }: { token: string; on
   const [kind, setKind] = useState("all");
   const [error, setError] = useState("");
   useEffect(() => { request(`/library?kind=${kind}&search=${encodeURIComponent(search)}`, token).then(setItems).catch((reason) => setError(reason.message)); }, [kind, search, token]);
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal library-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><header><div><p className="eyebrow">LIBRARY</p><h2 id="picker-title">Add Content</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="picker-controls"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search library" /><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All types</option><option value="design">Designs</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option></select></div>{error ? <p className="enrollment-error">{error}</p> : <div className="picker-items">{items.map((item) => <button key={`${item.kind}-${item.id}`} className="picker-item" onClick={() => onSelected(item)}><div className="picker-thumb"><LibraryThumbnail item={item} token={token} /></div><div><b>{item.name}</b><small>{item.kind.toUpperCase()} · {item.status}</small></div></button>)}</div>}</section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal library-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><header><div><p className="eyebrow">LIBRARY</p><h2 id="picker-title">Add Content</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="picker-controls"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search library" /><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All types</option><option value="design">Designs</option><option value="web">Web links</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option></select></div>{error ? <p className="enrollment-error">{error}</p> : <div className="picker-items">{items.map((item) => <button key={`${item.kind}-${item.id}`} className="picker-item" onClick={() => onSelected(item)}><div className="picker-thumb"><LibraryThumbnail item={item} token={token} /></div><div><b>{item.name}</b><small>{item.kind.toUpperCase()} · {item.status}</small></div></button>)}</div>}</section></div>;
 }
 
 function AssignmentEditorDialog({ assignment, token, onClose, onSaved }: { assignment: PlayerAssignment; token: string; onClose: () => void; onSaved: () => void }) {
@@ -1300,7 +1329,7 @@ function PlayersView({
                   </span>
                 </header>
                 <p className="display-location">{player.building_name}{player.description ? ` · ${player.description}` : ""}</p>
-                {player.health_state !== "waiting_for_enrollment" && <p className="display-health">{player.content_count || 0} item{player.content_count === 1 ? "" : "s"} · Cache {player.cache_state || "unknown"}<br />{player.last_seen_at ? `Seen ${new Date(player.last_seen_at).toLocaleString()}` : "Never connected"}</p>}
+                {player.health_state !== "waiting_for_enrollment" && <p className="display-health">{player.content_count || 0} item{player.content_count === 1 ? "" : "s"} · Cache {player.cache_state || "unknown"}<br />{player.connected_ip ? `Connected from ${player.connected_ip}` : "IP available after first heartbeat"}<br />{player.last_seen_at ? `Seen ${new Date(player.last_seen_at).toLocaleString()}` : "Never connected"}</p>}
                 <footer>
                   <button className="secondary-button" onClick={() => setPreviewPlayerId(player.id)}>Preview</button>
                   <button className="primary" onClick={() => onManage(player.id)}>Manage Display</button>
@@ -1858,9 +1887,10 @@ function PlaceholderPlayerDialog({ buildings, onClose, onSubmit }: { buildings: 
 }
 
 function PlayerMoreDialog({ player, token, onClose, onEdit, onRemove, onForceSync }: { player: Player; token: string; onClose: () => void; onEdit: () => void; onRemove: () => void; onForceSync: () => void }) {
-  const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [resolution, setResolution] = useState(player.resolution || "1920x1080");
   const forceSync = async () => { setBusy(true); try { await request(`/players/${player.id}/commands`, token, { method: "POST", body: JSON.stringify({ command: "force_sync" }) }); onForceSync(); onClose(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to queue Force Sync."); } finally { setBusy(false); } };
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal compact-actions" role="dialog" aria-modal="true" aria-labelledby="player-more-title"><header><div><p className="eyebrow">DISPLAY ACTIONS</p><h2 id="player-more-title">{player.name}</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="modal-action-list"><button className="secondary-button" onClick={onEdit}>Edit Display</button><button className="secondary-button" onClick={forceSync} disabled={busy}>{busy ? "Queuing…" : "Force Sync"}</button><button className="danger-button" onClick={onRemove}>Remove Display</button>{error && <p className="enrollment-error">{error}</p>}</div></section></div>;
+  const applyResolution = async () => { setBusy(true); try { await request(`/players/${player.id}/commands`, token, { method: "POST", body: JSON.stringify({ command: "set_resolution", resolution }) }); onForceSync(); onClose(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to queue the resolution change."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal compact-actions" role="dialog" aria-modal="true" aria-labelledby="player-more-title"><header><div><p className="eyebrow">DISPLAY ACTIONS</p><h2 id="player-more-title">{player.name}</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="modal-action-list"><button className="secondary-button" onClick={onEdit}>Edit Display</button><button className="secondary-button" onClick={forceSync} disabled={busy}>{busy ? "Queuing…" : "Force Sync"}</button><label>Force display resolution<select value={resolution} onChange={(event) => setResolution(event.target.value)} disabled={busy}><option value="1280x720">1280 × 720</option><option value="1366x768">1366 × 768</option><option value="1920x1080">1920 × 1080</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select><small>Applied by the Pi kiosk; unsupported TV modes report back as failed.</small></label><button className="secondary-button" onClick={applyResolution} disabled={busy}>{busy ? "Queuing…" : "Apply resolution"}</button><button className="danger-button" onClick={onRemove}>Remove Display</button>{error && <p className="enrollment-error">{error}</p>}</div></section></div>;
 }
 
 function BuildingsView({
@@ -2643,24 +2673,10 @@ function UsersView({
   notify: (m: string) => void;
 }) {
   const [users, setUsers] = useState<User[]>([]);
-  const [buildings, setBuildings] = useState<Building[]>([]);
-  const [players, setPlayers] = useState<Player[]>([]);
-  const [scopeType, setScopeType] = useState("building");
   const [error, setError] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const reload = useCallback(
-    () =>
-      Promise.all([
-        request("/users", token),
-        request("/buildings", token),
-        request("/players", token),
-      ])
-        .then(([nextUsers, nextBuildings, nextPlayers]) => {
-          setUsers(nextUsers);
-          setBuildings(nextBuildings);
-          setPlayers(nextPlayers);
-        })
-        .catch((e) => setError(e.message)),
+    () => request("/users", token).then(setUsers).catch((e) => setError(e.message)),
     [token],
   );
   useEffect(() => {
@@ -2682,10 +2698,10 @@ function UsersView({
           display_name: form.get("display_name"),
           password: form.get("password"),
           enabled: true,
-          super_admin: false,
+          role: form.get("role"),
         }),
       });
-      notify("User created. Give them access below once they have a scope.");
+      notify("User created with the selected role.");
       formElement.reset();
       setNewPassword("");
       reload();
@@ -2693,34 +2709,16 @@ function UsersView({
       setError(e instanceof Error ? e.message : "Unable to create user.");
     }
   };
-  const grant = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const userId = String(form.get("user_id"));
+  const changeRole = async (item: User, role: string) => {
     try {
-      await request(`/users/${userId}/grants`, token, {
-        method: "POST",
-        body: JSON.stringify({
-          capability: form.get("capability"),
-          scope_type: scopeType,
-          scope_id: scopeType === "district" ? null : form.get("scope_id"),
-        }),
+      await request(`/users/${item.id}`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ role }),
       });
-      notify("Access granted. Signal will apply it immediately.");
+      notify(`${item.display_name} is now ${role.replaceAll("_", " ")}.`);
       reload();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to grant access.");
-    }
-  };
-  const remove = async (userId: string, grantId: string) => {
-    try {
-      await request(`/users/${userId}/grants/${grantId}`, token, {
-        method: "DELETE",
-      });
-      notify("Access removed.");
-      reload();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to remove access.");
+      setError(e instanceof Error ? e.message : "Unable to update role.");
     }
   };
   const toggle = async (item: User) => {
@@ -2754,14 +2752,13 @@ function UsersView({
       setError(e instanceof Error ? e.message : "Unable to reset password.");
     }
   };
-  const options = scopeType === "building" ? buildings : players;
   return (
     <>
       <div className="page-title">
         <div>
           <p className="eyebrow">ADMINISTRATION</p>
-          <h1>Users &amp; access</h1>
-          <p>Access is granted in plain language and enforced by Signal.</p>
+          <h1>Users &amp; roles</h1>
+          <p>Roles are enforced consistently across the whole district.</p>
         </div>
       </div>
       <section className="panel create-panel">
@@ -2777,58 +2774,14 @@ function UsersView({
             placeholder="Temporary password"
             required
           />
+          <select name="role" defaultValue="user" aria-label="Role">
+            <option value="user">User · view only</option>
+            <option value="uploader_creator">Uploader / Creator</option>
+            <option value="admin">Admin</option>
+            <option value="super_admin">Super Admin</option>
+          </select>
           <PasswordRequirements password={newPassword} />
           <button className="secondary-button">Create user</button>
-        </form>
-      </section>
-      <section className="panel create-panel">
-        <h2>Give access</h2>
-        <p>Choose what a person can do and where they can do it.</p>
-        <form onSubmit={grant} className="grant-form">
-          <select name="user_id" required defaultValue="">
-            <option value="" disabled>
-              Choose a user
-            </option>
-            {users
-              .filter((item) => !item.super_admin)
-              .map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.display_name}
-                </option>
-              ))}
-          </select>
-          <select name="capability" defaultValue="view">
-            <option value="view">View</option>
-            <option value="upload_media">Upload media</option>
-            <option value="manage_media">Manage media</option>
-            <option value="manage_players">Manage players</option>
-            <option value="create_content">Create content</option>
-            <option value="edit_content">Edit content</option>
-            <option value="publish">Publish</option>
-          </select>
-          <select
-            value={scopeType}
-            onChange={(e) => setScopeType(e.target.value)}
-          >
-            <option value="district">District</option>
-            <option value="building">Building</option>
-            <option value="player">Player</option>
-          </select>
-          {scopeType === "district" ? (
-            <span className="scope-note">All district resources</span>
-          ) : (
-            <select name="scope_id" required defaultValue="">
-              <option value="" disabled>
-                Choose {scopeType}
-              </option>
-              {options.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          )}
-          <button className="secondary-button">Give access</button>
         </form>
       </section>
       {error && <ErrorState message={error} />}
@@ -2844,15 +2797,15 @@ function UsersView({
                   </small>
                 </div>
                 <div className="user-actions">
-                  <span
-                    className={
-                      item.super_admin ? "state published" : "state draft"
-                    }
-                  >
-                    {item.super_admin ? "Super Admin" : "Local user"}
-                  </span>
+                  <span className={item.role === "super_admin" ? "state published" : "state draft"}>{item.role.replaceAll("_", " ")}</span>
                   {!item.super_admin && (
                     <>
+                      <select value={item.role} onChange={(event) => changeRole(item, event.target.value)} aria-label={`Role for ${item.display_name}`}>
+                        <option value="user">User</option>
+                        <option value="uploader_creator">Uploader / Creator</option>
+                        <option value="admin">Admin</option>
+                        <option value="super_admin">Super Admin</option>
+                      </select>
                       <button onClick={() => reset(item)}>
                         Reset password
                       </button>
@@ -2863,26 +2816,6 @@ function UsersView({
                   )}
                 </div>
               </div>
-              {!item.super_admin && (
-                <div className="grant-list">
-                  {item.grants.length ? (
-                    item.grants.map((access) => (
-                      <span className="grant-chip" key={access.id}>
-                        {access.capability.replaceAll("_", " ")} ·{" "}
-                        {access.scope_type}
-                        <button
-                          onClick={() => remove(item.id, access.id)}
-                          aria-label="Remove access"
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))
-                  ) : (
-                    <small>No access assigned yet.</small>
-                  )}
-                </div>
-              )}
             </div>
           ))}
         </section>

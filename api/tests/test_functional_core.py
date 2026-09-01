@@ -37,7 +37,7 @@ def client(tmp_path: Path, monkeypatch):
         high = Building(name="High School")
         middle = Building(name="Middle School")
         admin = User(username="admin", display_name="Admin", password_hash=auth.hash_password("a-long-test-password"), super_admin=True)
-        kitchen = User(username="kitchen", display_name="Kitchen User", password_hash=auth.hash_password("a-long-test-password"))
+        kitchen = User(username="kitchen", display_name="Kitchen User", password_hash=auth.hash_password("a-long-test-password"), role="uploader_creator")
         disabled = User(username="disabled", display_name="Disabled User", password_hash=auth.hash_password("a-long-test-password"), enabled=False)
         db.add_all([high, middle, admin, kitchen, disabled]); db.flush()
         cafeteria = Player(name="HS Cafeteria", building_id=high.id)
@@ -66,16 +66,16 @@ def test_authentication_and_protected_endpoint(client):
     assert test_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).json()["super_admin"] is True
 
 
-def test_scoped_visibility_and_write_protection(client):
+def test_role_based_visibility_and_write_protection(client):
     test_client, ids = client
     admin_token = login(test_client, "admin")
     kitchen_token = login(test_client, "kitchen")
     kitchen_headers = {"Authorization": f"Bearer {kitchen_token}"}
     assert len(test_client.get("/api/v1/players", headers={"Authorization": f"Bearer {admin_token}"}).json()) == 2
     visible = test_client.get("/api/v1/players", headers=kitchen_headers).json()
-    assert [item["id"] for item in visible] == [ids["cafeteria"]]
+    assert len(visible) == 2
     buildings = test_client.get("/api/v1/buildings", headers=kitchen_headers).json()
-    assert [item["id"] for item in buildings] == [ids["high"]]
+    assert len(buildings) == 2
     denied = test_client.post("/api/v1/players", headers=kitchen_headers, json={"name": "Not allowed", "building_id": ids["high"], "enabled": True})
     assert denied.status_code == 403
 

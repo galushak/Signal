@@ -7,6 +7,7 @@ from sqlalchemy import select
 from .auth import hash_password, password_policy_error
 from .database import SessionLocal
 from .models import AppSettings, Layout, User, Zone
+from .authorization import SUPER_ADMIN
 
 
 FULL_SCREEN_LAYOUT_ID = "00000000-0000-4000-8000-000000000001"
@@ -55,7 +56,7 @@ def main() -> None:
     with SessionLocal() as db:
         if db.scalar(select(User).where(User.username == args.username.lower())):
             raise SystemExit("That username already exists.")
-        user = User(username=args.username.lower(), display_name=args.display_name, password_hash=hash_password(args.password), super_admin=True)
+        user = User(username=args.username.lower(), display_name=args.display_name, password_hash=hash_password(args.password), role=SUPER_ADMIN, super_admin=True)
         db.add(user)
         db.flush()
         app_settings = db.get(AppSettings, 1)

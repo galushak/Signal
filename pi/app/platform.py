@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -26,6 +27,12 @@ class PlayerPlatform:
 
     def renderer_status(self) -> str:
         return "local_web_only"
+
+    def resolution(self) -> str:
+        return "1920x1080"
+
+    def set_resolution(self, resolution: str) -> tuple[str, dict]:
+        return "unsupported", {"reason": "display resolution is not available on this platform"}
 
     def restart_renderer(self) -> tuple[str, dict]:
         return "unsupported", {"reason": "renderer restart is not available on this platform"}
@@ -72,6 +79,29 @@ class RaspberryPiPlatform(PlayerPlatform):
             return "running" if result.returncode == 0 else "not_running"
         except OSError:
             return "unknown"
+
+    def _xrandr(self, *args: str) -> subprocess.CompletedProcess[str]:
+        environment = {**os.environ, "DISPLAY": ":0", "XAUTHORITY": "/var/lib/signal-player/.Xauthority"}
+        return subprocess.run(["xrandr", *args], env=environment, text=True, capture_output=True, check=False)
+
+    def resolution(self) -> str:
+        try:
+            result = self._xrandr("--current")
+            match = re.search(r"\s(\d{3,5})x(\d{3,5})\+\d+\+\d+", result.stdout)
+            return f"{match.group(1)}x{match.group(2)}" if match else super().resolution()
+        except OSError:
+            return super().resolution()
+
+    def set_resolution(self, resolution: str) -> tuple[str, dict]:
+        if not re.fullmatch(r"\d{3,5}x\d{3,5}", resolution):
+            return "failed", {"error": "Invalid resolution."}
+        try:
+            result = self._xrandr("--size", resolution)
+        except OSError as exc:
+            return "failed", {"error": str(exc)}
+        if result.returncode:
+            return "failed", {"error": (result.stderr or result.stdout or "xrandr rejected this resolution.").strip()}
+        return "completed", {"resolution": self.resolution()}
 
 
 def platform_for_environment() -> PlayerPlatform:

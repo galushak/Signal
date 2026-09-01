@@ -136,3 +136,31 @@ def test_force_sync_reports_player_acknowledgement(client):
     status = test_client.get(f"/api/v1/players/{player_id}/commands/{command_id}", headers=headers).json()
     assert status["status"] == "completed"
     assert status["result"] == {"state": "already_up_to_date"}
+
+
+def test_web_links_and_resolution_commands_are_player_ready(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    link = test_client.post(
+        "/api/v1/content/web-link",
+        headers=headers,
+        json={"name": "Board Slides", "url": "https://docs.google.com/presentation/d/example/embed"},
+    )
+    assert link.status_code == 201
+    library = test_client.get("/api/v1/library?kind=web", headers=headers).json()
+    assert any(item["id"] == link.json()["id"] and item["status"] == "Published" for item in library)
+
+    prepared = prepare(test_client, headers, ids["high"], "Resolution test")
+    credentials = enroll_device(test_client, prepared["enrollment"]["code"], "resolution-device-0001").json()
+    player_id = prepared["player"]["id"]
+    device_headers = {"X-Signal-Player-ID": credentials["player_id"], "X-Signal-Player-Secret": credentials["device_secret"]}
+    assert test_client.post("/api/v1/player-agent/heartbeat", headers=device_headers, json={"resolution": "1280x720"}).status_code == 200
+    player = test_client.get(f"/api/v1/players/{player_id}", headers=headers).json()["player"]
+    assert player["resolution"] == "1280x720"
+    assert player["connected_ip"]
+
+    queued = test_client.post(f"/api/v1/players/{player_id}/commands", headers=headers, json={"command": "set_resolution", "resolution": "1920x1080"})
+    assert queued.status_code == 201
+    command = test_client.get("/api/v1/player-agent/commands", headers=device_headers).json()[0]
+    assert command["command"] == "set_resolution"
+    assert command["payload"] == {"resolution": "1920x1080"}

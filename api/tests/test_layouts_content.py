@@ -65,7 +65,7 @@ def test_published_versions_are_immutable_and_restore_creates_draft(client):
     assert test_client.post(f"/api/v1/content/{content['id']}/restore/{published['revision']}", headers=headers).status_code == 200
 
 
-def test_zone_only_user_cannot_access_sibling_zone(client):
+def test_uploader_creator_role_can_author_and_standard_user_cannot(client):
     test_client, _ = client
     admin = login(test_client, "admin")
     headers = {"Authorization": f"Bearer {admin}"}
@@ -73,14 +73,16 @@ def test_zone_only_user_cannot_access_sibling_zone(client):
     menu = test_client.post(f"/api/v1/layouts/{layout['id']}/zones", headers=headers, json={"name": "Menu", "x": 0, "y": 0, "width": 960, "height": 1080}).json()
     district = test_client.post(f"/api/v1/layouts/{layout['id']}/zones", headers=headers, json={"name": "District", "x": 960, "y": 0, "width": 960, "height": 1080}).json()
     kitchen = next(item for item in test_client.get("/api/v1/users", headers=headers).json() if item["username"] == "kitchen")
-    for capability in ("view", "create_content", "edit_content", "publish", "schedule"):
-        assert test_client.post(f"/api/v1/users/{kitchen['id']}/grants", headers=headers, json={"capability": capability, "scope_type": "zone", "scope_id": menu["id"]}).status_code == 201
+    assert test_client.patch(f"/api/v1/users/{kitchen['id']}", headers=headers, json={"role": "uploader_creator"}).status_code == 200
     kitchen_headers = {"Authorization": f"Bearer {login(test_client, 'kitchen')}"}
     destinations = test_client.get("/api/v1/destinations", headers=kitchen_headers).json()
-    assert [zone["id"] for zone in destinations["zones"]] == [menu["id"]]
-    content = test_client.post("/api/v1/content", headers=kitchen_headers, json={"name": "Menu only", "scope_type": "zone", "scope_id": menu["id"], "design_document": document("Lunch")})
+    assert {menu["id"], district["id"]}.issubset({zone["id"] for zone in destinations["zones"]})
+    content = test_client.post("/api/v1/content", headers=kitchen_headers, json={"name": "District menu", "scope_type": "zone", "scope_id": menu["id"], "design_document": document("Lunch")})
     assert content.status_code == 201
-    assert test_client.post(f"/api/v1/content/{content.json()['id']}/assignments", headers=kitchen_headers, json={"destination_type": "zone", "destination_id": district["id"]}).status_code == 403
+    assert test_client.post(f"/api/v1/content/{content.json()['id']}/publish", headers=kitchen_headers).status_code == 200
+    assert test_client.post(f"/api/v1/content/{content.json()['id']}/assignments", headers=kitchen_headers, json={"destination_type": "zone", "destination_id": district["id"]}).status_code == 201
+    assert test_client.patch(f"/api/v1/users/{kitchen['id']}", headers=headers, json={"role": "user"}).status_code == 200
+    assert test_client.post("/api/v1/content", headers=kitchen_headers, json={"name": "Blocked", "design_document": document("Blocked")}).status_code == 403
 
 
 def test_unified_library_surfaces_authorized_designs_with_thumbnail(client):
