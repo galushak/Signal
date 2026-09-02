@@ -14,7 +14,7 @@ WorkingDirectory=/opt/signal-player
 Environment=SIGNAL_PLATFORM=raspberry-pi
 Environment=SIGNAL_STATE_DIR=/var/lib/signal-player
 Environment=SIGNAL_CONFIG_PATH=/etc/signal-player/config.toml
-ExecStart=/opt/signal-player/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
+ExecStart=/opt/signal-player/bin/signal-player-python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
