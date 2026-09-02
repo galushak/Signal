@@ -64,7 +64,7 @@ def test_direct_media_frame_maps_fit_and_fill_without_grid_sizing():
 
 
 def test_player_version_is_explicit_and_used_by_cli(capsys):
-    assert PLAYER_VERSION == "0.1.0-rc1"
+    assert PLAYER_VERSION == "0.1.0-rc5"
     assert cli_main(["version"]) == 0
     assert capsys.readouterr().out.strip() == PLAYER_VERSION
 

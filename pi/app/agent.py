@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import time
 import tomllib
@@ -22,10 +23,21 @@ LOG = logging.getLogger("signal.player")
 
 def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = path.stat()
+    except FileNotFoundError:
+        existing = None
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
         stream.write(data)
         temp = Path(stream.name)
-    os.chmod(temp, mode)
+    os.chmod(temp, stat.S_IMODE(existing.st_mode) if existing else mode)
+    if existing:
+        try:
+            os.chown(temp, existing.st_uid, existing.st_gid)
+        except PermissionError:
+            # The unprivileged player can still update its own configuration;
+            # retain ownership of the replacement in that case.
+            pass
     temp.replace(path)
 
 

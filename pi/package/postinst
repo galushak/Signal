@@ -14,12 +14,12 @@ case "$1" in
       /var/lib/signal-player/runtime \
       /var/lib/signal-player/.config \
       /var/lib/signal-player/.cache
-    install -d -o root -g signal-player -m 0770 /etc/signal-player
+    install -d -o signal-player -g signal-player -m 0750 /etc/signal-player
     if [ ! -f /etc/signal-player/config.toml ]; then
-      install -o root -g signal-player -m 0660 /usr/share/signal-player/config.toml /etc/signal-player/config.toml
+      install -o signal-player -g signal-player -m 0640 /usr/share/signal-player/config.toml /etc/signal-player/config.toml
     else
-      chown root:signal-player /etc/signal-player/config.toml
-      chmod 0660 /etc/signal-player/config.toml
+      chown signal-player:signal-player /etc/signal-player/config.toml
+      chmod 0640 /etc/signal-player/config.toml
     fi
     if command -v systemctl >/dev/null 2>&1; then
       systemctl daemon-reload || true
