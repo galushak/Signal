@@ -255,6 +255,43 @@ class ContentAssignment(Timestamped, Base):
     created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
 
+class Playlist(Timestamped, Base):
+    __tablename__ = "playlists"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(String(32), default="announcement")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class PlaylistItem(Timestamped, Base):
+    __tablename__ = "playlist_items"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    playlist_id: Mapped[str] = mapped_column(ForeignKey("playlists.id", ondelete="CASCADE"), index=True)
+    content_id: Mapped[str | None] = mapped_column(ForeignKey("content.id", ondelete="CASCADE"), nullable=True)
+    media_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class PlaylistAssignment(Timestamped, Base):
+    __tablename__ = "playlist_assignments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    playlist_id: Mapped[str] = mapped_column(ForeignKey("playlists.id", ondelete="CASCADE"), index=True)
+    destination_type: Mapped[str] = mapped_column(String(16))
+    destination_id: Mapped[str] = mapped_column(String(36), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=3)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    weekdays: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    daily_start: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    daily_end: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
 class ContentTemplate(Timestamped, Base):
     __tablename__ = "content_templates"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

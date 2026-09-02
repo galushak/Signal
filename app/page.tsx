@@ -75,7 +75,15 @@ type ContentItem = {
 };
 type DesignDocument = {
   schema: "signal.design/v1";
-  canvas: { width: number; height: number };
+  canvas: { width: number; height: number; background?: string };
+  elements: DesignElement[];
+  slides?: DeckSlide[];
+};
+type DeckSlide = {
+  id: string;
+  name?: string;
+  duration_seconds?: number;
+  canvas: { width: number; height: number; background?: string };
   elements: DesignElement[];
 };
 type DesignElement = {
@@ -114,6 +122,26 @@ type LibraryItem = {
   tags?: string[];
   trashed?: boolean;
 };
+type Playlist = {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  items: { id: string; source_type: "content" | "media"; source_id: string; name: string; duration_seconds?: number | null; thumbnail_url?: string | null }[];
+  assignments: { id: string; destination_type: string; destination_id: string; destination_name: string; starts_at?: string | null; ends_at?: string | null; priority: number }[];
+};
+
+const isContentLibraryItem = (item: LibraryItem) => item.kind === "design" || item.kind === "web";
+
+function deckSlides(document: DesignDocument): DeckSlide[] {
+  if (document.slides?.length) return document.slides;
+  return [{ id: "slide-1", name: "Slide 1", duration_seconds: 10, canvas: document.canvas, elements: document.elements }];
+}
+
+function withDeck(document: DesignDocument, slides: DeckSlide[]): DesignDocument {
+  const first = slides[0] || { canvas: { width: 1920, height: 1080 }, elements: [] };
+  return { schema: "signal.design/v1", canvas: first.canvas, elements: first.elements, slides };
+}
 type Dashboard = {
   players_total: number;
   players_online: number;
@@ -339,6 +367,7 @@ export function SignalApp() {
   const navigation = [
     ["dashboard", "▦", "Dashboard"],
     ["media", "◫", "Library"],
+    ["playlists", "☷", "Playlists"],
     ["players", "▣", "Players"],
     ["buildings", "⌂", "Buildings"],
   ];
@@ -429,6 +458,7 @@ export function SignalApp() {
               initialContentId={libraryDesignId}
               onInitialContentOpened={() => setLibraryDesignId(null)}
               onDone={() => setView("media")}
+              onNavigate={setView}
             />
           )}
           {view === "media" && (
@@ -439,6 +469,7 @@ export function SignalApp() {
               onCreateDesign={() => setView("content")}
             />
           )}
+          {view === "playlists" && <PlaylistsView token={token} notify={show} />}
           {view === "players" && (
             <PlayersView
               token={token}
@@ -732,6 +763,7 @@ function MediaView({
   const [sendItem, setSendItem] = useState<LibraryItem | null>(null);
   const [trashItem, setTrashItem] = useState<LibraryItem | null>(null);
   const [deleteItem, setDeleteItem] = useState<LibraryItem | null>(null);
+  const [editWebLink, setEditWebLink] = useState<LibraryItem | null>(null);
   const reload = useCallback(
     () =>
       Promise.all([
@@ -912,8 +944,13 @@ function MediaView({
                     Open in Designer
                   </button>
                 )}
+                {asset.kind === "web" && !asset.trashed && (
+                  <button className="secondary-button" onClick={() => setEditWebLink(asset)}>
+                    Edit web link
+                  </button>
+                )}
                 {!asset.trashed && <button className="primary" onClick={() => setSendItem(asset)}>Send to Display</button>}
-                {asset.trashed ? <div className="button-row"><button className="secondary-button" onClick={async () => { try { await request(asset.kind === "design" ? `/content/${asset.id}/untrash` : `/media/${asset.id}/restore`, token, { method: "POST" }); notify(`“${asset.name}” was restored.`); reload(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to restore item."); } }}>Restore</button><button className="card-text-action danger" onClick={() => setDeleteItem(asset)}>Permanently Delete</button></div> : <button className="card-text-action" onClick={() => setTrashItem(asset)}>⋯ More</button>}
+                {asset.trashed ? <div className="button-row"><button className="secondary-button" onClick={async () => { try { await request(isContentLibraryItem(asset) ? `/content/${asset.id}/untrash` : `/media/${asset.id}/restore`, token, { method: "POST" }); notify(`“${asset.name}” was restored.`); reload(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to restore item."); } }}>Restore</button><button className="card-text-action danger" onClick={() => setDeleteItem(asset)}>Permanently Delete</button></div> : <button className="card-text-action" onClick={() => setTrashItem(asset)}>⋯ More</button>}
               </article>
             ))
           ) : (
@@ -934,19 +971,47 @@ function MediaView({
       )}
       {trashItem && <TrashLibraryDialog item={trashItem} token={token} onClose={() => setTrashItem(null)} onDone={(message) => { notify(message); setTrashItem(null); reload(); }} />}
       {deleteItem && <PermanentDeleteDialog item={deleteItem} token={token} onClose={() => setDeleteItem(null)} onDone={() => { notify(`“${deleteItem.name}” was permanently deleted.`); setDeleteItem(null); reload(); }} />}
+      {editWebLink && <WebLinkEditorDialog item={editWebLink} token={token} onClose={() => setEditWebLink(null)} onSaved={(message) => { notify(message); setEditWebLink(null); reload(); }} />}
     </>
   );
 }
 
+function WebLinkEditorDialog({ item, token, onClose, onSaved }: { item: LibraryItem; token: string; onClose: () => void; onSaved: (message: string) => void }) {
+  const [name, setName] = useState(item.name);
+  const [url, setUrl] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    request<ContentItem[]>("/content", token)
+      .then((content) => {
+        const document = content.find((entry) => entry.id === item.id)?.published_version?.design_document;
+        setUrl(document?.elements.find((element) => element.type === "website")?.text || "");
+      })
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Unable to load this web link."));
+  }, [item.id, token]);
+  const save = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/content/${item.id}/web-link`, token, { method: "PATCH", body: JSON.stringify({ name, url }) });
+      onSaved(`“${name}” was updated and sent to its assigned displays.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to update web link.");
+    } finally { setBusy(false); }
+  };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="edit-web-link-title"><header><div><p className="eyebrow">WEB LINK</p><h2 id="edit-web-link-title">Edit web link</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={save}><label>Name<input value={name} onChange={(event) => setName(event.target.value)} required /></label><label>Embed URL<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://docs.google.com/presentation/.../embed" required /><small>Use the published embed URL for Google Slides, not the editor link.</small></label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save web link"}</button></footer></form></section></div>;
+}
+
 function TrashLibraryDialog({ item, token, onClose, onDone }: { item: LibraryItem; token: string; onClose: () => void; onDone: (message: string) => void }) {
   const [requiresRemoval, setRequiresRemoval] = useState(false); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
-  const trash = async () => { setBusy(true); try { await request(item.kind === "design" ? `/content/${item.id}/trash` : `/media/${item.id}/trash`, token, { method: "POST", body: JSON.stringify({ remove_assignments: requiresRemoval }) }); onDone(`“${item.name}” moved to Trash${requiresRemoval ? " and was removed from its displays" : ""}.`); } catch (reason) { const message = reason instanceof Error ? reason.message : "Unable to move this item to Trash."; if (message.includes("currently assigned")) setRequiresRemoval(true); setError(message); } finally { setBusy(false); } };
+  const trash = async () => { setBusy(true); try { await request(isContentLibraryItem(item) ? `/content/${item.id}/trash` : `/media/${item.id}/trash`, token, { method: "POST", body: JSON.stringify({ remove_assignments: requiresRemoval }) }); onDone(`“${item.name}” moved to Trash${requiresRemoval ? " and was removed from its displays" : ""}.`); } catch (reason) { const message = reason instanceof Error ? reason.message : "Unable to move this item to Trash."; if (message.includes("currently assigned")) setRequiresRemoval(true); setError(message); } finally { setBusy(false); } };
   return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="trash-title"><header><div><p className="eyebrow">MOVE TO TRASH</p><h2 id="trash-title">Move “{item.name}” to Trash?</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="remove-player-copy"><p>{requiresRemoval ? "This item is assigned to one or more displays. Continue to remove those assignments and move it to Trash." : "You can restore this item later from Library → Trash."}</p>{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="danger-button" onClick={trash} disabled={busy}>{busy ? "Moving…" : requiresRemoval ? "Remove from Displays and Trash" : "Move to Trash"}</button></footer></section></div>;
 }
 
 function PermanentDeleteDialog({ item, token, onClose, onDone }: { item: LibraryItem; token: string; onClose: () => void; onDone: () => void }) {
   const [value, setValue] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
-  const remove = async () => { setBusy(true); try { await request(item.kind === "design" ? `/content/${item.id}` : `/media/${item.id}`, token, { method: "DELETE", body: JSON.stringify({ confirmation: value }) }); onDone(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to permanently delete item."); } finally { setBusy(false); } };
+  const remove = async () => { setBusy(true); try { await request(isContentLibraryItem(item) ? `/content/${item.id}` : `/media/${item.id}`, token, { method: "DELETE", body: JSON.stringify({ confirmation: value }) }); onDone(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to permanently delete item."); } finally { setBusy(false); } };
   return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="permanent-delete-title"><header><div><p className="eyebrow">PERMANENT DELETE</p><h2 id="permanent-delete-title">Permanently delete “{item.name}”?</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="remove-player-copy"><p>This cannot be undone. Type <b>DELETE</b> to continue.</p><input aria-label="Type DELETE to confirm" value={value} onChange={(event) => setValue(event.target.value)} />{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="danger-button" onClick={remove} disabled={busy || value !== "DELETE"}>{busy ? "Deleting…" : "Permanently Delete"}</button></footer></section></div>;
 }
 
@@ -967,7 +1032,7 @@ function SendToDisplayDialog({
     players: Player[];
     zones: (Zone & { layout_name: string })[];
   }>({ players: [], zones: [] });
-  const [destination, setDestination] = useState(initialDestination || "");
+  const [selectedDestinations, setSelectedDestinations] = useState<string[]>(initialDestination ? [initialDestination] : []);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -977,37 +1042,22 @@ function SendToDisplayDialog({
   }, [token]);
   const send = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const [destinationType, destinationId] = destination.split(":");
-    if (!destinationType || !destinationId) {
-      setError("Choose a display destination.");
+    if (!selectedDestinations.length) {
+      setError("Choose at least one display.");
       return;
     }
     const form = new FormData(event.currentTarget);
     setBusy(true);
     setError("");
     try {
-      await request(
-        item.kind === "design"
-          ? `/content/${item.id}/assignments`
-          : `/media/${item.id}/assignments`,
-        token,
-        {
+      await Promise.all(selectedDestinations.map((destination) => {
+        const [destinationType, destinationId] = destination.split(":");
+        return request(isContentLibraryItem(item) ? `/content/${item.id}/assignments` : `/media/${item.id}/assignments`, token, {
           method: "POST",
-          body: JSON.stringify({
-            destination_type: destinationType,
-            destination_id: destinationId,
-            duration_seconds: form.get("duration_seconds") ? Number(form.get("duration_seconds")) : null,
-            transition: form.get("transition"),
-            priority: Number(form.get("priority")),
-            display_mode: form.get("display_mode") || "fit",
-            enabled: form.get("enabled") === "on",
-            starts_at: form.get("start_mode") === "schedule" ? form.get("starts_at") || null : null,
-            ends_at: form.get("expire") === "yes" ? form.get("ends_at") || null : null,
-          }),
-        },
-      );
-      const display = destinations.players.find((player) => player.id === destinationId)?.name || destinations.zones.find((zone) => zone.id === destinationId)?.name || "this display";
-      onSent(display);
+          body: JSON.stringify({ destination_type: destinationType, destination_id: destinationId, duration_seconds: form.get("duration_seconds") ? Number(form.get("duration_seconds")) : null, transition: form.get("transition"), priority: Number(form.get("priority")), display_mode: form.get("display_mode") || "fit", enabled: form.get("enabled") === "on", starts_at: form.get("start_mode") === "schedule" ? form.get("starts_at") || null : null, ends_at: form.get("expire") === "yes" ? form.get("ends_at") || null : null }),
+        });
+      }));
+      onSent(selectedDestinations.length === 1 ? destinations.players.find((player) => `player:${player.id}` === selectedDestinations[0])?.name || "this display" : `${selectedDestinations.length} displays`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to send this item.");
     } finally {
@@ -1022,12 +1072,7 @@ function SendToDisplayDialog({
           <button className="close" aria-label="Close" onClick={onClose}>×</button>
         </header>
         <form onSubmit={send}>
-          <label>Display
-            <select value={destination} onChange={(event) => setDestination(event.target.value)} required>
-              <option value="">Choose display</option>
-              {destinations.players.map((player) => <option key={player.id} value={`player:${player.id}`}>{player.name} · {player.building_name}</option>)}
-            </select>
-          </label>
+          <div className="destination-checklist"><div className="destination-checklist-heading"><b>Choose displays</b><button type="button" className="text-button" onClick={() => setSelectedDestinations(selectedDestinations.length === destinations.players.length ? [] : destinations.players.map((player) => `player:${player.id}`))}>{selectedDestinations.length === destinations.players.length ? "Clear all" : "Select all"}</button></div><p>Send this item to one or more displays. Existing base content remains in place.</p>{destinations.players.map((player) => <label className="destination-check" key={player.id}><input type="checkbox" checked={selectedDestinations.includes(`player:${player.id}`)} onChange={(event) => setSelectedDestinations((current) => event.target.checked ? [...current, `player:${player.id}`] : current.filter((id) => id !== `player:${player.id}`))} /><span><b>{player.name}</b><small>{player.building_name} · {player.health_state}</small></span></label>)}</div>
           <div className="playback-fields">
             <label>Duration<input name="duration_seconds" type="number" min="1" max="3600" placeholder="Signal default" /> seconds</label>
             <label>Transition<select name="transition" defaultValue="fade"><option value="fade">Fade</option><option value="none">None</option><option value="slide">Slide</option></select></label>
@@ -1211,13 +1256,114 @@ function LayoutChangeDialog({ player, currentLayout, hasZoneAssignments, token, 
   return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal layout-change-modal" role="dialog" aria-modal="true" aria-labelledby="layout-change-title"><header><div><p className="eyebrow">DISPLAY LAYOUT</p><h2 id="layout-change-title">Change Layout</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="layout-change-body"><p>Current: <b>{currentLayout?.name || player.effective_layout?.name || "Full Screen"}</b></p><label>Choose Layout<select value={selected} onChange={(event) => setSelected(event.target.value)}>{layouts.map((layout) => <option key={layout.id} value={layout.id}>{layout.name}{layout.system ? " · System" : ""}</option>)}</select></label>{preview && <div className="layout-mini-preview" aria-label={`${preview.name} preview`}>{preview.zones.map((zone) => <span key={zone.id} style={{ left: `${zone.x / 19.2}%`, top: `${zone.y / 10.8}%`, width: `${zone.width / 19.2}%`, height: `${zone.height / 10.8}%` }}>{zone.name}</span>)}</div>}{changing && <p className="layout-warning">{hasZoneAssignments ? "This display has zone-specific content. Assignments not present in the new layout will be preserved for reassignment; direct display content remains available." : "Direct display content remains available after this layout change."}</p>}{error && <p className="enrollment-error">{error}</p>}</div><footer className="modal-footer"><button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" onClick={apply} disabled={busy || !selected || selected === currentLayout?.id}>{busy ? "Applying…" : "Apply Layout"}</button></footer></section></div>;
 }
 
-function LibraryPickerDialog({ token, onClose, onSelected }: { token: string; onClose: () => void; onSelected: (item: LibraryItem) => void }) {
+function PlaylistsView({ token, notify }: { token: string; notify: (message: string) => void }) {
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [selected, setSelected] = useState<Playlist | null>(null);
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [addingItem, setAddingItem] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      const [next, destinations] = await Promise.all([request<Playlist[]>("/playlists", token), request<{ players: Player[] }>("/destinations", token)]);
+      setPlaylists(next);
+      setPlayers(destinations.players);
+      setSelected((current) => next.find((item) => item.id === current?.id) || next[0] || null);
+      setError("");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load playlists."); }
+  }, [token]);
+  useEffect(() => { load(); }, [load]);
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    try {
+      const created = await request<Playlist>("/playlists", token, { method: "POST", body: JSON.stringify({ name: form.get("name"), description: form.get("description") || null, enabled: true }) });
+      setCreating(false);
+      setSelected(created);
+      notify(`Announcement playlist “${created.name}” created.`);
+      load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to create playlist."); }
+    finally { setBusy(false); }
+  };
+  const addItem = async (item: LibraryItem) => {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      await request(`/playlists/${selected.id}/items`, token, { method: "POST", body: JSON.stringify({ source_type: isContentLibraryItem(item) ? "content" : "media", source_id: item.id, duration_seconds: null }) });
+      setAddingItem(false);
+      notify(`“${item.name}” added to ${selected.name}.`);
+      load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to add playlist item."); }
+    finally { setBusy(false); }
+  };
+  const removeItem = async (itemId: string) => {
+    if (!selected) return;
+    setBusy(true);
+    try { await request(`/playlists/${selected.id}/items/${itemId}`, token, { method: "DELETE" }); notify("Playlist item removed."); load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to remove playlist item."); }
+    finally { setBusy(false); }
+  };
+  const schedule = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selected) return;
+    const form = new FormData(event.currentTarget);
+    const playerIds = form.getAll("players").map(String);
+    if (!playerIds.length) { setError("Choose at least one display."); return; }
+    const starts = String(form.get("starts_at") || "");
+    const ends = String(form.get("ends_at") || "");
+    setBusy(true);
+    try {
+      await Promise.all(playerIds.map((destination_id) => request(`/playlists/${selected.id}/assignments`, token, { method: "POST", body: JSON.stringify({ destination_type: "player", destination_id, enabled: true, priority: 3, starts_at: starts ? new Date(starts).toISOString() : null, ends_at: ends ? new Date(ends).toISOString() : null }) })));
+      notify(`${selected.name} is scheduled. It will take over only during its scheduled window, then base content resumes.`);
+      load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to schedule playlist."); }
+    finally { setBusy(false); }
+  };
+  const removeSchedule = async (assignmentId: string) => {
+    if (!selected) return;
+    setBusy(true);
+    try { await request(`/playlists/${selected.id}/assignments/${assignmentId}`, token, { method: "DELETE" }); notify("Playlist schedule removed; base content remains untouched."); load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to remove playlist schedule."); }
+    finally { setBusy(false); }
+  };
+  return <><div className="page-title"><div><p className="eyebrow">ANNOUNCEMENTS</p><h1>Playlists</h1><p>Build scheduled announcement rotations that take over temporarily, then automatically return each display to its base content.</p></div><button className="primary" onClick={() => setCreating(true)}>+ New announcement playlist</button></div>{error && <ErrorState message={error} />}<section className="playlist-workspace"><aside className="playlist-list panel"><div className="playlist-list-header"><b>Announcement playlists</b><span>{playlists.length}</span></div>{playlists.length ? playlists.map((playlist) => <button key={playlist.id} className={selected?.id === playlist.id ? "playlist-card selected" : "playlist-card"} onClick={() => setSelected(playlist)}><b>{playlist.name}</b><small>{playlist.items.length} items · {playlist.assignments.length} scheduled displays</small></button>) : <Empty text="Create a playlist for rotating announcements." />}</aside><section className="playlist-editor panel">{selected ? <><div className="playlist-editor-heading"><div><p className="eyebrow">BASE-SAFE SCHEDULE</p><h2>{selected.name}</h2><p>{selected.description || "Announcement content runs at high priority only during its schedule."}</p></div><span className="schedule-badge">Base resumes</span></div><div className="playlist-section"><div className="section-heading"><div><h3>Playlist items</h3><p>These rotate while the announcement schedule is active.</p></div><button className="secondary-button" onClick={() => setAddingItem(true)}>+ Add from Library</button></div>{selected.items.length ? <ol className="playlist-items">{selected.items.map((item, index) => <li key={item.id}><span className="playlist-item-index">{index + 1}</span><div><b>{item.name}</b><small>{item.source_type} · {item.duration_seconds || 20}s</small></div><button className="card-text-action danger" disabled={busy} onClick={() => removeItem(item.id)}>Remove</button></li>)}</ol> : <Empty text="Add designs, web links, images, video, or PDFs from Library." />}</div><div className="playlist-section schedule-section"><div className="section-heading"><div><h3>Schedule on displays</h3><p>Announcement playlists never delete or replace base display content.</p></div></div><form className="playlist-schedule-form" onSubmit={schedule}><div className="playlist-display-checks">{players.map((player) => <label key={player.id}><input name="players" type="checkbox" value={player.id} /><span><b>{player.name}</b><small>{player.building_name} · {player.health_state}</small></span></label>)}</div><div className="playlist-times"><label>Starts<input name="starts_at" type="datetime-local" /></label><label>Ends<input name="ends_at" type="datetime-local" /></label><button className="primary" disabled={busy || !selected.items.length}>{busy ? "Scheduling…" : "Schedule announcement"}</button></div></form>{selected.assignments.length ? <div className="playlist-schedules">{selected.assignments.map((assignment) => <div key={assignment.id}><span><b>{assignment.destination_name}</b><small>{assignment.starts_at ? `Starts ${new Date(assignment.starts_at).toLocaleString()}` : "Starts immediately"}{assignment.ends_at ? ` · ends ${new Date(assignment.ends_at).toLocaleString()}` : " · no end"}</small></span><button className="card-text-action danger" disabled={busy} onClick={() => removeSchedule(assignment.id)}>Remove</button></div>)}</div> : <p className="muted">Not scheduled yet.</p>}</div></> : <Empty text="Choose a playlist or create your first announcement playlist." />}</section></section>{creating && <div className="modal-backdrop" role="presentation"><section className="enrollment-modal playlist-create-modal" role="dialog" aria-modal="true" aria-labelledby="new-playlist-title"><header><div><p className="eyebrow">ANNOUNCEMENTS</p><h2 id="new-playlist-title">New announcement playlist</h2></div><button className="close" aria-label="Close" onClick={() => setCreating(false)}>×</button></header><form onSubmit={create}><label>Name<input name="name" placeholder="e.g. Morning announcements" required /></label><label>Description<textarea name="description" placeholder="When this should take over from normal display content" /></label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={() => setCreating(false)} disabled={busy}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Creating…" : "Create playlist"}</button></footer></form></section></div>}{addingItem && <LibraryPickerDialog token={token} allowedKinds={["design", "web", "image", "video", "pdf"]} onClose={() => setAddingItem(false)} onSelected={addItem} />}</>;
+}
+
+function LibraryPickerDialog({ token, onClose, onSelected, allowedKinds }: { token: string; onClose: () => void; onSelected: (item: LibraryItem) => void; allowedKinds?: LibraryItem["kind"][] }) {
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [search, setSearch] = useState("");
   const [kind, setKind] = useState("all");
   const [error, setError] = useState("");
   useEffect(() => { request(`/library?kind=${kind}&search=${encodeURIComponent(search)}`, token).then(setItems).catch((reason) => setError(reason.message)); }, [kind, search, token]);
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal library-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><header><div><p className="eyebrow">LIBRARY</p><h2 id="picker-title">Add Content</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="picker-controls"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search library" /><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All types</option><option value="design">Designs</option><option value="web">Web links</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option></select></div>{error ? <p className="enrollment-error">{error}</p> : <div className="picker-items">{items.map((item) => <button key={`${item.kind}-${item.id}`} className="picker-item" onClick={() => onSelected(item)}><div className="picker-thumb"><LibraryThumbnail item={item} token={token} /></div><div><b>{item.name}</b><small>{item.kind.toUpperCase()} · {item.status}</small></div></button>)}</div>}</section></div>;
+  const availableItems = allowedKinds ? items.filter((item) => allowedKinds.includes(item.kind)) : items;
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal library-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><header><div><p className="eyebrow">LIBRARY</p><h2 id="picker-title">Add Content</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><div className="picker-controls"><input type="search" aria-label="Search library" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search library" /><select aria-label="Filter library by type" value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All types</option><option value="design">Designs</option><option value="web">Web links</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option></select></div>{error ? <p className="enrollment-error">{error}</p> : <div className="picker-items">{availableItems.length ? availableItems.map((item) => <button key={`${item.kind}-${item.id}`} className="picker-item" onClick={() => onSelected(item)}><div className="picker-thumb"><LibraryThumbnail item={item} token={token} /></div><div><b>{item.name}</b><small>{item.kind.toUpperCase()} · {item.status}</small></div></button>) : <Empty text="No compatible library items found." />}</div>}</section></div>;
+}
+
+function EditorMediaUploadDialog({ token, onClose, onUploaded }: { token: string; onClose: () => void; onUploaded: (assets: Media[]) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const upload = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const files = form.getAll("files").filter((file) => file instanceof File && file.size > 0);
+    if (!files.length) {
+      setError("Choose at least one image, video, or PDF.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const uploaded = await request<Media[]>("/media/upload", token, { method: "POST", body: form });
+      onUploaded(uploaded);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Upload failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal editor-upload-modal" role="dialog" aria-modal="true" aria-labelledby="editor-upload-title"><header><div><p className="eyebrow">CONTENT EDITOR</p><h2 id="editor-upload-title">Upload and add to slide</h2></div><button className="close" aria-label="Close" onClick={onClose} disabled={busy}>×</button></header><form onSubmit={upload}><p className="form-help">Files are added to the Library and placed on the current slide immediately. Signal prepares previews in the background.</p><input name="scope_type" type="hidden" value="district" /><label>Files<input name="files" type="file" multiple accept="image/jpeg,image/png,image/webp,application/pdf,video/*" required disabled={busy} /><small>Images, video, and PDFs</small></label><label>Tags <small>(optional)</small><input name="tags" placeholder="e.g. announcements, fall" disabled={busy} /></label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Uploading…" : "Upload and add"}</button></footer></form></section></div>;
 }
 
 function AssignmentEditorDialog({ assignment, token, onClose, onSaved }: { assignment: PlayerAssignment; token: string; onClose: () => void; onSaved: () => void }) {
@@ -2147,12 +2293,14 @@ function ContentView({
   initialContentId,
   onInitialContentOpened,
   onDone,
+  onNavigate,
 }: {
   token: string;
   notify: (m: string) => void;
   initialContentId: string | null;
   onInitialContentOpened: () => void;
   onDone: () => void;
+  onNavigate: (view: string) => void;
 }) {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [selected, setSelected] = useState<ContentItem | null>(null);
@@ -2344,6 +2492,7 @@ function ContentView({
           reload();
           onDone();
         }}
+        onNavigate={onNavigate}
         onChanged={persistDesign}
       />
     );
@@ -2412,6 +2561,7 @@ function DesignerScreen({
   token,
   notify,
   onBack,
+  onNavigate,
   onChanged,
 }: {
   content: ContentItem;
@@ -2419,13 +2569,62 @@ function DesignerScreen({
   token: string;
   notify: (message: string) => void;
   onBack: () => void;
+  onNavigate: (view: string) => void;
   onChanged: (document: DesignerDocument) => void;
 }) {
   const [saving, setSaving] = useState("Saved ✓");
-  const save = (next: DesignerDocument) => {
+  const [slideIndex, setSlideIndex] = useState(0);
+  const [assetType, setAssetType] = useState<"image" | "video" | "pdf" | "website" | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const slides = deckSlides(document);
+  const activeIndex = Math.min(slideIndex, Math.max(slides.length - 1, 0));
+  const activeSlide = slides[activeIndex];
+  const persistSlides = (next: DeckSlide[]) => {
     setSaving("Saving…");
-    onChanged(next);
+    onChanged(withDeck(document, next));
     window.setTimeout(() => setSaving("Saved ✓"), 400);
+  };
+  const save = (next: DesignerDocument) => {
+    persistSlides(slides.map((slide, index) => index === activeIndex ? { ...slide, canvas: next.canvas, elements: next.elements } : slide));
+  };
+  const addSlide = () => { const next = [...slides, { id: newClientId(), name: `Slide ${slides.length + 1}`, duration_seconds: 10, canvas: { width: 1920, height: 1080, background: "#172d43" }, elements: [] }]; persistSlides(next); setSlideIndex(next.length - 1); };
+  const duplicateSlide = () => { if (!activeSlide) return; const copy = { ...activeSlide, id: newClientId(), name: `${activeSlide.name || `Slide ${activeIndex + 1}`} copy`, elements: activeSlide.elements.map((element) => ({ ...element, id: newClientId(), style: { ...element.style } })) }; const next = [...slides.slice(0, activeIndex + 1), copy, ...slides.slice(activeIndex + 1)]; persistSlides(next); setSlideIndex(activeIndex + 1); };
+  const removeSlide = () => { if (slides.length < 2) return; const next = slides.filter((_, index) => index !== activeIndex); persistSlides(next); setSlideIndex(Math.max(0, activeIndex - 1)); };
+  const appendAssets = (assets: { kind: "image" | "video" | "pdf" | "website"; name: string; assetId?: string }[]) => {
+    if (!activeSlide || !assets.length) return;
+    const elements = assets.map((asset, index) => ({
+      id: newClientId(),
+      type: asset.kind,
+      text: asset.name,
+      ...(asset.assetId ? { media_id: asset.assetId, assetId: asset.assetId } as any : {}),
+      x: 180 + ((activeSlide.elements.length + index) % 5) * 36,
+      y: 180 + ((activeSlide.elements.length + index) % 4) * 36,
+      width: asset.kind === "pdf" ? 560 : 900,
+      height: asset.kind === "pdf" ? 700 : 510,
+      z_index: activeSlide.elements.length + index + 1,
+      style: { fill: asset.kind === "website" ? "#edf4fb" : "#dbe5f0", fit: "contain" },
+    } as DesignElement));
+    persistSlides(slides.map((slide, index) => index === activeIndex ? { ...slide, elements: [...slide.elements, ...elements] } : slide));
+  };
+  const addFromLibrary = async (item: LibraryItem) => {
+    if (!activeSlide || !assetType) return;
+    let name = item.name;
+    let assetId: string | undefined = item.id;
+    if (assetType === "website") {
+      const content = await request<ContentItem[]>("/content", token);
+      const source = content.find((entry) => entry.id === item.id)?.published_version?.design_document || content.find((entry) => entry.id === item.id)?.draft_version?.design_document;
+      name = source?.elements.find((element) => element.type === "website")?.text || "https://example.org";
+      assetId = undefined;
+    }
+    appendAssets([{ kind: assetType, name, assetId }]);
+    setAssetType(null);
+    notify(`${item.name} added to slide ${activeIndex + 1}.`);
+  };
+  const addUploadedMedia = (assets: Media[]) => {
+    const supported = assets.filter((asset) => ["image", "video", "pdf"].includes(asset.media_type));
+    appendAssets(supported.map((asset) => ({ kind: asset.media_type as "image" | "video" | "pdf", name: asset.display_name, assetId: asset.id })));
+    setUploadOpen(false);
+    notify(`${supported.length === 1 ? `“${supported[0].display_name}” was` : `${supported.length} files were`} uploaded to Library and added to slide ${activeIndex + 1}.`);
   };
   const publish = async () => {
     try {
@@ -2439,39 +2638,44 @@ function DesignerScreen({
       );
     }
   };
+  const updateDuration = (duration: number) => persistSlides(slides.map((slide, index) => index === activeIndex ? { ...slide, duration_seconds: duration } : slide));
   return (
     <main className="designer-page">
-      <header className="designer-header">
-        <button className="back" onClick={onBack}>
-          ← Library
-        </button>
-        <div className="designer-name">
-          <b>{content.name}</b>
-          <small>{saving}</small>
+      <aside className="designer-app-nav" aria-label="Signal navigation">
+        <div className="designer-brand"><span className="designer-brand-mark">S</span><b>Signal</b></div>
+        <nav>
+          <button onClick={onBack}><span>▦</span>Library</button>
+          <button className="active"><span>▤</span>Content</button>
+          <button onClick={() => onNavigate("playlists")}><span>☷</span>Playlists</button>
+          <button onClick={() => onNavigate("players")}><span>▣</span>Displays</button>
+        </nav>
+        <div className="designer-nav-footer"><span className="designer-nav-avatar">S</span><div><b>Signal Workspace</b><small>Content editor</small></div></div>
+      </aside>
+      <section className="designer-shell">
+        <header className="designer-header">
+          <div className="designer-title-row">
+            <button className="designer-back" onClick={onBack} aria-label="Back to Library">←</button>
+            <div className="designer-name"><b>{content.name}</b><button title="Design name is set in Library" aria-label="Design name">✎</button><small>{saving}</small></div>
+          </div>
+          <div className="designer-header-actions">
+            <button className="secondary-button" onClick={() => notify("Preview uses the same 16:9 canvas and slide timing as the player.")}>◉&nbsp; Preview</button>
+            <button className="primary" onClick={publish}>➤&nbsp; Publish</button>
+          </div>
+        </header>
+        <div className="slides-designer-layout">
+          <aside className="slide-rail">
+            <div className="slide-rail-title"><b>Slides</b><span>{slides.length}</span></div>
+            <div className="slide-list">{slides.map((slide, index) => <button key={slide.id} className={index === activeIndex ? "slide-thumb active" : "slide-thumb"} onClick={() => setSlideIndex(index)}><span className="slide-number">{index + 1}</span><span className="slide-preview" style={{ background: slide.canvas.background || "#172d43" }}>{slide.elements.slice(0, 3).map((element) => <i key={element.id} style={{ left: `${element.x / 19.2}%`, top: `${element.y / 10.8}%`, width: `${Math.max(10, element.width / 19.2)}%`, height: `${Math.max(5, element.height / 10.8)}%`, background: String(element.style?.fill || "#ffffff") }} />)}</span><small>{slide.name || `Slide ${index + 1}`}</small></button>)}</div>
+            <button className="slide-action primary" onClick={addSlide}>＋ Add slide</button>
+            <button className="slide-action secondary-button" onClick={duplicateSlide}>⧉ Duplicate</button>
+            <button className="slide-delete" onClick={removeSlide} disabled={slides.length < 2}>Delete slide</button>
+            <section className="designer-library-dock"><header><b>Library</b><span>×</span></header><div><button onClick={() => setAssetType("image")}><strong>▧</strong>Images</button><button onClick={() => setAssetType("video")}><strong>▷</strong>Video</button><button onClick={() => setAssetType("website")}><strong>↗</strong>Web link</button><button onClick={() => setAssetType("pdf")}><strong>▤</strong>PDF</button></div><button className="editor-upload-button" onClick={() => setUploadOpen(true)}>↑ Upload files</button></section>
+          </aside>
+          <section className="deck-editor"><SignalDesigner document={{ schema: "signal.design/v1", canvas: activeSlide?.canvas || { width: 1920, height: 1080 }, elements: activeSlide?.elements || [] }} onChange={save} onPickAsset={setAssetType} slideDuration={activeSlide?.duration_seconds || 10} onSlideDurationChange={updateDuration} /></section>
         </div>
-        <div className="designer-header-actions">
-          <button
-            className="secondary-button"
-            onClick={() =>
-              notify(
-                "Preview uses the same 16:9 document as the canvas. This is a server-side design preview, not a player screenshot.",
-              )
-            }
-          >
-            Preview
-          </button>
-          <button className="primary" onClick={publish}>Save Version</button>
-          <button className="secondary-button" onClick={onBack}>Done</button>
-        </div>
-      </header>
-      <SignalDesigner
-        document={document}
-        onChange={save}
-        onPreview={() =>
-          notify("Preview uses the same 16:9 document as the canvas.")
-        }
-        onPublish={publish}
-      />
+      </section>
+      {assetType && <LibraryPickerDialog token={token} allowedKinds={assetType === "website" ? ["web"] : [assetType]} onClose={() => setAssetType(null)} onSelected={addFromLibrary} />}
+      {uploadOpen && <EditorMediaUploadDialog token={token} onClose={() => setUploadOpen(false)} onUploaded={addUploadedMedia} />}
     </main>
   );
 }

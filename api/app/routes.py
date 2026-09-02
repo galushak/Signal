@@ -19,7 +19,7 @@ from .audit import record
 from .authorization import ADMIN, BUILDING, DISTRICT, PLAYER, ROLES, SUPER_ADMIN, UPLOADER_CREATOR, USER, ZONE, allowed, normalized_role, require, visible_building_ids, visible_player_ids
 from .bootstrap import ensure_full_screen_layout
 from .database import get_db
-from .models import AppSettings, AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, PlayerCommand, PlayerEnrollment, Tag, User, Zone
+from .models import AppSettings, AuditEvent, Building, Content, ContentAssignment, ContentTemplate, ContentVersion, Layout, LayoutVersion, MediaAsset, MediaAssetTag, MediaFolder, PermissionGrant, Player, PlayerCommand, PlayerEnrollment, Playlist, PlaylistAssignment, PlaylistItem, Tag, User, Zone
 from .player_protocol import MANIFEST_SCHEMA, _asset_ids, build_manifest, media_is_allowed
 from .settings import get_settings
 from .worker import prepare_media
@@ -176,6 +176,30 @@ class AssignmentInput(BaseModel):
     duration_seconds: int | None = Field(default=None, ge=1, le=3600)
     transition: str | None = None
     display_mode: str = "fit"
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    weekdays: list[int] | None = None
+    daily_start: str | None = None
+    daily_end: str | None = None
+
+
+class PlaylistInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=500)
+    enabled: bool = True
+
+
+class PlaylistItemInput(BaseModel):
+    source_type: str = Field(pattern="^(content|media)$")
+    source_id: str = Field(min_length=1, max_length=36)
+    duration_seconds: int | None = Field(default=None, ge=1, le=3600)
+
+
+class PlaylistAssignmentInput(BaseModel):
+    destination_type: str
+    destination_id: str
+    enabled: bool = True
+    priority: int = Field(default=3, ge=1, le=3)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     weekdays: list[int] | None = None
@@ -1083,6 +1107,33 @@ def assignment_data(item: ContentAssignment, db: Session | None = None) -> dict:
     return data
 
 
+def playlist_item_data(item: PlaylistItem, db: Session) -> dict:
+    if item.content_id:
+        content = db.get(Content, item.content_id)
+        return {"id": item.id, "source_type": "content", "source_id": item.content_id, "name": content.name if content else "Unavailable content", "duration_seconds": item.duration_seconds, "thumbnail_url": f"/api/v1/content/{item.content_id}/thumbnail.svg" if content else None}
+    asset = db.get(MediaAsset, item.media_asset_id) if item.media_asset_id else None
+    return {"id": item.id, "source_type": "media", "source_id": item.media_asset_id, "name": asset.display_name if asset else "Unavailable media", "duration_seconds": item.duration_seconds, "thumbnail_url": f"/api/v1/media/{item.media_asset_id}/thumbnail" if asset and asset.thumbnail_path else None}
+
+
+def playlist_assignment_data(item: PlaylistAssignment, db: Session) -> dict:
+    label = "Display"
+    if item.destination_type == PLAYER:
+        player = db.get(Player, item.destination_id)
+        label = player.name if player else label
+    elif item.destination_type == ZONE:
+        zone = db.get(Zone, item.destination_id)
+        label = zone.name if zone else label
+    return {"id": item.id, "destination_type": item.destination_type, "destination_id": item.destination_id, "destination_name": label, "enabled": item.enabled, "priority": item.priority, "starts_at": item.starts_at, "ends_at": item.ends_at, "weekdays": item.weekdays, "daily_start": item.daily_start, "daily_end": item.daily_end}
+
+
+def playlist_data(item: Playlist, db: Session, include_children: bool = True) -> dict:
+    data = {"id": item.id, "name": item.name, "description": item.description, "kind": item.kind, "enabled": item.enabled, "created_at": item.created_at, "updated_at": item.updated_at}
+    if include_children:
+        data["items"] = [playlist_item_data(entry, db) for entry in db.scalars(select(PlaylistItem).where(PlaylistItem.playlist_id == item.id).order_by(PlaylistItem.position, PlaylistItem.created_at))]
+        data["assignments"] = [playlist_assignment_data(entry, db) for entry in db.scalars(select(PlaylistAssignment).where(PlaylistAssignment.playlist_id == item.id).order_by(PlaylistAssignment.created_at))]
+    return data
+
+
 def affected_players(destination_type: str, destination_id: str, db: Session) -> list[Player]:
     if destination_type == PLAYER:
         player = db.get(Player, destination_id)
@@ -1225,8 +1276,11 @@ def delete_layout(layout_id: str, request: Request, user: User = Depends(auth.ge
 
 
 def valid_design(document: dict) -> None:
-    if document.get("schema") != "signal.design/v1" or not isinstance(document.get("elements"), list): raise HTTPException(status_code=422, detail="Use a Signal design document with an elements list.")
-    ids = [element.get("id") for element in document["elements"]]
+    if document.get("schema") != "signal.design/v1": raise HTTPException(status_code=422, detail="Use a Signal design document.")
+    slides = document.get("slides")
+    pages = slides if isinstance(slides, list) else [document]
+    if not pages or any(not isinstance(page, dict) or not isinstance(page.get("elements"), list) for page in pages): raise HTTPException(status_code=422, detail="Every Signal slide needs an elements list.")
+    ids = [element.get("id") for page in pages for element in page["elements"]]
     if any(not isinstance(element_id, str) or not element_id for element_id in ids) or len(ids) != len(set(ids)): raise HTTPException(status_code=422, detail="Every design element needs a stable unique ID.")
 
 
@@ -1361,6 +1415,38 @@ def create_web_link(payload: WebLinkInput, request: Request, user: User = Depend
     return content_data(item, db)
 
 
+@router.patch("/content/{content_id}/web-link")
+def update_web_link(content_id: str, payload: WebLinkInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    """Revise a published web link without treating it as a media asset.
+
+    Web links are Content records so they flow through the same assignment,
+    schedule, trash, and player-rendering paths as Signal designs.
+    """
+    item = content_for_user(content_id, "edit_content", user, db)
+    require(user, "publish", item.scope_type, item.scope_id, db)
+    if item.content_type != "web_link":
+        raise HTTPException(status_code=422, detail="This library item is not a web link.")
+    name = clean_text(payload.name, "Name", 160)
+    url = payload.url.strip()
+    document = {
+        "schema": "signal.design/v1",
+        "canvas": {"width": 1920, "height": 1080, "background": "#000000"},
+        "elements": [{"id": str(uuid.uuid4()), "type": "website", "text": url, "x": 0, "y": 0, "width": 1920, "height": 1080, "z_index": 1}],
+    }
+    valid_design(document)
+    for prior in db.scalars(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "published")):
+        prior.state = "superseded"
+    revision = (db.scalar(select(func.max(ContentVersion.revision)).where(ContentVersion.content_id == item.id)) or 0) + 1
+    item.name = name
+    version = ContentVersion(content_id=item.id, revision=revision, state="published", design_document=document, note="Web link updated", created_by_id=user.id, published_at=datetime.now(UTC))
+    db.add(version)
+    for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.content_id == item.id)):
+        refresh_desired_state(assignment.destination_type, assignment.destination_id, db)
+    record(db, actor=user, action="content.web_link_updated", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"url": url, "revision": revision})
+    db.commit()
+    return content_data(item, db)
+
+
 @router.get("/content/{content_id}/versions")
 def list_content_versions(content_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     content_for_user(content_id, "view", user, db); return [version_data(item) for item in db.scalars(select(ContentVersion).where(ContentVersion.content_id == content_id).order_by(ContentVersion.revision.desc()))]
@@ -1380,7 +1466,10 @@ def publish_content(content_id: str, request: Request, user: User = Depends(auth
     item = content_for_user(content_id, "publish", user, db); draft = db.scalar(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "draft"))
     if not draft: raise HTTPException(status_code=409, detail="There are no draft changes to publish.")
     for prior in db.scalars(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "published")): prior.state = "superseded"
-    draft.state, draft.published_at = "published", datetime.now(UTC); record(db, actor=user, action="content.published", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"revision": draft.revision}); db.commit(); return version_data(draft)
+    draft.state, draft.published_at = "published", datetime.now(UTC)
+    for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.content_id == item.id)):
+        refresh_desired_state(assignment.destination_type, assignment.destination_id, db)
+    record(db, actor=user, action="content.published", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"revision": draft.revision}); db.commit(); return version_data(draft)
 
 
 @router.post("/content/{content_id}/restore/{revision}")
@@ -1517,6 +1606,99 @@ def list_destinations(user: User = Depends(auth.get_current_user), db: Session =
     for item in db.scalars(select(Zone).order_by(Zone.name)):
         if allowed(user, "schedule", ZONE, item.id, db): zones.append({**zone_data(item), "layout_name": item.layout.name})
     return {"players": players, "zones": zones}
+
+
+@router.get("/playlists")
+def list_playlists(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "view", DISTRICT, None, db)
+    return [playlist_data(item, db) for item in db.scalars(select(Playlist).order_by(Playlist.updated_at.desc()))]
+
+
+@router.post("/playlists", status_code=201)
+def create_playlist(payload: PlaylistInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "create_content", DISTRICT, None, db)
+    item = Playlist(name=clean_text(payload.name, "Playlist name", 160), description=payload.description.strip() if payload.description else None, kind="announcement", enabled=payload.enabled, created_by_id=user.id)
+    db.add(item); db.flush()
+    record(db, actor=user, action="playlist.created", resource_type="playlist", resource_id=item.id, resource_name=item.name, source_ip=auth.client_ip(request))
+    db.commit()
+    return playlist_data(item, db)
+
+
+@router.get("/playlists/{playlist_id}")
+def get_playlist(playlist_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "view", DISTRICT, None, db)
+    item = db.get(Playlist, playlist_id)
+    if not item: raise HTTPException(status_code=404, detail="Playlist not found.")
+    return playlist_data(item, db)
+
+
+@router.post("/playlists/{playlist_id}/items", status_code=201)
+def add_playlist_item(playlist_id: str, payload: PlaylistItemInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "create_content", DISTRICT, None, db)
+    playlist = db.get(Playlist, playlist_id)
+    if not playlist: raise HTTPException(status_code=404, detail="Playlist not found.")
+    values: dict[str, str] = {}
+    if payload.source_type == "content":
+        content = content_for_user(payload.source_id, "view", user, db)
+        if not db.scalar(select(ContentVersion).where(ContentVersion.content_id == content.id, ContentVersion.state == "published")):
+            raise HTTPException(status_code=409, detail="Publish the design before adding it to a playlist.")
+        values["content_id"] = content.id
+    else:
+        asset = media_for_user(payload.source_id, user, db)
+        if asset.processing_state != "ready": raise HTTPException(status_code=409, detail="Wait for Signal to finish preparing this media.")
+        values["media_asset_id"] = asset.id
+    position = (db.scalar(select(func.max(PlaylistItem.position)).where(PlaylistItem.playlist_id == playlist.id)) or -1) + 1
+    entry = PlaylistItem(playlist_id=playlist.id, position=position, duration_seconds=payload.duration_seconds, created_by_id=user.id, **values)
+    db.add(entry); db.flush()
+    for assignment in db.scalars(select(PlaylistAssignment).where(PlaylistAssignment.playlist_id == playlist.id)):
+        refresh_desired_state(assignment.destination_type, assignment.destination_id, db)
+    record(db, actor=user, action="playlist.item_added", resource_type="playlist", resource_id=playlist.id, resource_name=playlist.name, source_ip=auth.client_ip(request))
+    db.commit()
+    return playlist_item_data(entry, db)
+
+
+@router.delete("/playlists/{playlist_id}/items/{item_id}")
+def delete_playlist_item(playlist_id: str, item_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require(user, "edit_content", DISTRICT, None, db)
+    entry = db.get(PlaylistItem, item_id)
+    if not entry or entry.playlist_id != playlist_id: raise HTTPException(status_code=404, detail="Playlist item not found.")
+    playlist = db.get(Playlist, playlist_id)
+    db.delete(entry)
+    for assignment in db.scalars(select(PlaylistAssignment).where(PlaylistAssignment.playlist_id == playlist_id)):
+        refresh_desired_state(assignment.destination_type, assignment.destination_id, db)
+    record(db, actor=user, action="playlist.item_removed", resource_type="playlist", resource_id=playlist_id, resource_name=playlist.name if playlist else "Playlist", source_ip=auth.client_ip(request))
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/playlists/{playlist_id}/assignments", status_code=201)
+def assign_playlist(playlist_id: str, payload: PlaylistAssignmentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    if payload.destination_type not in {PLAYER, ZONE}: raise HTTPException(status_code=422, detail="Choose a player or zone destination.")
+    scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
+    playlist = db.get(Playlist, playlist_id)
+    if not playlist: raise HTTPException(status_code=404, detail="Playlist not found.")
+    if not db.scalar(select(PlaylistItem.id).where(PlaylistItem.playlist_id == playlist.id).limit(1)):
+        raise HTTPException(status_code=409, detail="Add at least one Library item before scheduling this playlist.")
+    if payload.ends_at and payload.starts_at and payload.ends_at <= payload.starts_at: raise HTTPException(status_code=422, detail="The end time must be after the start time.")
+    if payload.weekdays and any(day not in range(7) for day in payload.weekdays): raise HTTPException(status_code=422, detail="Weekdays must be Monday through Sunday.")
+    entry = PlaylistAssignment(playlist_id=playlist.id, destination_type=payload.destination_type, destination_id=payload.destination_id, enabled=payload.enabled, priority=payload.priority, starts_at=payload.starts_at, ends_at=payload.ends_at, weekdays=payload.weekdays, daily_start=payload.daily_start, daily_end=payload.daily_end, created_by_id=user.id)
+    db.add(entry); db.flush(); refresh_desired_state(entry.destination_type, entry.destination_id, db)
+    record(db, actor=user, action="playlist.scheduled", resource_type="playlist", resource_id=playlist.id, resource_name=playlist.name, scope_type=entry.destination_type, scope_id=entry.destination_id, source_ip=auth.client_ip(request))
+    db.commit()
+    return playlist_assignment_data(entry, db)
+
+
+@router.delete("/playlists/{playlist_id}/assignments/{assignment_id}")
+def remove_playlist_assignment(playlist_id: str, assignment_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    entry = db.get(PlaylistAssignment, assignment_id)
+    if not entry or entry.playlist_id != playlist_id: raise HTTPException(status_code=404, detail="Playlist schedule not found.")
+    require(user, "schedule", entry.destination_type, entry.destination_id, db)
+    playlist = db.get(Playlist, playlist_id)
+    destination = (entry.destination_type, entry.destination_id)
+    db.delete(entry); db.flush(); refresh_desired_state(*destination, db)
+    record(db, actor=user, action="playlist.unscheduled", resource_type="playlist", resource_id=playlist_id, resource_name=playlist.name if playlist else "Playlist", scope_type=destination[0], scope_id=destination[1], source_ip=auth.client_ip(request))
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/templates", status_code=201)

@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Content, ContentAssignment, ContentVersion, Layout, MediaAsset, Player, Zone
+from .models import Content, ContentAssignment, ContentVersion, Layout, MediaAsset, Player, Playlist, PlaylistAssignment, PlaylistItem, Zone
 from .settings import get_settings
 
 MANIFEST_SCHEMA = 1
@@ -112,6 +112,51 @@ def build_manifest(player: Player, db: Session) -> dict:
             "design": document,
             "assignment": assignment_payload,
         })
+    # A playlist is deliberately expanded into its own scheduled rotation. It
+    # never mutates a player's direct/base assignments; its priority simply
+    # takes over while the schedule is eligible and releases the base again.
+    for schedule in db.scalars(select(PlaylistAssignment).where(PlaylistAssignment.destination_id.in_(destinations))).all():
+        playlist = db.get(Playlist, schedule.playlist_id)
+        if not playlist or not playlist.enabled:
+            continue
+        assignment_payload = {
+            "id": schedule.id,
+            "playlistId": playlist.id,
+            "playlistName": playlist.name,
+            "destinationType": schedule.destination_type,
+            "destinationId": schedule.destination_id,
+            "enabled": schedule.enabled,
+            "priority": schedule.priority,
+            "position": 0,
+            "durationSeconds": 20,
+            "transition": "fade",
+            "displayMode": "fit",
+            "startsAt": schedule.starts_at.isoformat() if schedule.starts_at else None,
+            "endsAt": schedule.ends_at.isoformat() if schedule.ends_at else None,
+            "weekdays": schedule.weekdays,
+            "dailyStart": schedule.daily_start,
+            "dailyEnd": schedule.daily_end,
+            "createdAt": schedule.created_at.isoformat() if schedule.created_at else None,
+        }
+        if layout and layout.system_key == FULL_SCREEN_SYSTEM_KEY and schedule.destination_type == "player" and schedule.destination_id == player.id:
+            assignment_payload["destinationType"] = "zone"
+            assignment_payload["destinationId"] = MAIN_ZONE_ID
+        for item in db.scalars(select(PlaylistItem).where(PlaylistItem.playlist_id == playlist.id).order_by(PlaylistItem.position, PlaylistItem.created_at)):
+            item_assignment = {**assignment_payload, "id": f"{schedule.id}:{item.id}", "position": item.position, "durationSeconds": item.duration_seconds or 20}
+            if item.media_asset_id:
+                asset = db.get(MediaAsset, item.media_asset_id)
+                if not asset or asset.trashed_at:
+                    continue
+                asset_ids.add(asset.id)
+                content_items.append({"id": item.id, "name": asset.display_name, "playlist": {"id": playlist.id, "name": playlist.name}, "source": {"type": asset.media_type, "assetId": asset.id}, "assignment": item_assignment})
+                continue
+            content = db.get(Content, item.content_id) if item.content_id else None
+            version = db.scalar(select(ContentVersion).where(ContentVersion.content_id == item.content_id, ContentVersion.state == "published")) if item.content_id else None
+            if not content or not version or content.trashed_at:
+                continue
+            document = version.design_document or {}
+            asset_ids.update(_asset_ids(document))
+            content_items.append({"id": item.id, "name": content.name, "revision": version.revision, "playlist": {"id": playlist.id, "name": playlist.name}, "source": {"type": "design"}, "design": document, "assignment": item_assignment})
     media = []
     for asset_id in sorted(asset_ids):
         asset = db.get(MediaAsset, asset_id)

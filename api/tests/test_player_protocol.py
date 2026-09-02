@@ -164,3 +164,43 @@ def test_web_links_and_resolution_commands_are_player_ready(client):
     command = test_client.get("/api/v1/player-agent/commands", headers=device_headers).json()[0]
     assert command["command"] == "set_resolution"
     assert command["payload"] == {"resolution": "1920x1080"}
+
+
+def test_web_link_edits_and_scheduled_playlists_build_a_base_safe_manifest(client):
+    test_client, ids = client
+    headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    prepared = prepare(test_client, headers, ids["high"], "Playlist manifest display")
+    credentials = enroll_device(test_client, prepared["enrollment"]["code"], "playlist-manifest-device").json()
+    player_id = prepared["player"]["id"]
+    device_headers = {"X-Signal-Player-ID": credentials["player_id"], "X-Signal-Player-Secret": credentials["device_secret"]}
+
+    document = {"schema": "signal.design/v1", "canvas": {"width": 1920, "height": 1080}, "elements": []}
+    base = test_client.post("/api/v1/content", headers=headers, json={"name": "Base rotation", "design_document": document}).json()
+    announcement = test_client.post("/api/v1/content", headers=headers, json={"name": "Emergency banner", "design_document": document}).json()
+    for item in (base, announcement):
+        assert test_client.post(f"/api/v1/content/{item['id']}/publish", headers=headers).status_code == 200
+    assert test_client.post(f"/api/v1/content/{base['id']}/assignments", headers=headers, json={"destination_type": "player", "destination_id": player_id}).status_code == 201
+
+    playlist = test_client.post("/api/v1/playlists", headers=headers, json={"name": "Urgent announcements"})
+    assert playlist.status_code == 201
+    playlist_id = playlist.json()["id"]
+    assert test_client.post(f"/api/v1/playlists/{playlist_id}/items", headers=headers, json={"source_type": "content", "source_id": announcement["id"]}).status_code == 201
+    scheduled = test_client.post(f"/api/v1/playlists/{playlist_id}/assignments", headers=headers, json={"destination_type": "player", "destination_id": player_id, "priority": 3})
+    assert scheduled.status_code == 201
+
+    manifest = test_client.get("/api/v1/player-agent/manifest", headers=device_headers)
+    assert manifest.status_code == 200
+    content = manifest.json()["content"]
+    assert any(entry["name"] == "Base rotation" and entry["assignment"]["priority"] == 1 for entry in content)
+    playlist_entry = next(entry for entry in content if entry["name"] == "Emergency banner")
+    assert playlist_entry["playlist"]["id"] == playlist_id
+    assert playlist_entry["assignment"]["priority"] == 3
+
+    link = test_client.post("/api/v1/content/web-link", headers=headers, json={"name": "Board Slides", "url": "https://docs.google.com/presentation/d/old/embed"}).json()
+    assert test_client.post(f"/api/v1/content/{link['id']}/assignments", headers=headers, json={"destination_type": "player", "destination_id": player_id}).status_code == 201
+    updated = test_client.patch(f"/api/v1/content/{link['id']}/web-link", headers=headers, json={"name": "Updated Board Slides", "url": "https://docs.google.com/presentation/d/new/embed"})
+    assert updated.status_code == 200
+    assert updated.json()["published_version"]["revision"] == 2
+    refreshed = test_client.get("/api/v1/player-agent/manifest", headers=device_headers).json()["content"]
+    link_entry = next(entry for entry in refreshed if entry["name"] == "Updated Board Slides")
+    assert link_entry["design"]["elements"][0]["text"] == "https://docs.google.com/presentation/d/new/embed"
