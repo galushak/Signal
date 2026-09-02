@@ -1,11 +1,18 @@
 #!/bin/sh
-# Started by the graphical signal-player session. The loop is the renderer
-# watchdog: Chromium is restarted after a crash without restarting the agent.
+# Started by the active graphical session. The loop is the renderer watchdog:
+# Chromium is restarted after a crash without restarting the agent.
 set -eu
 
-export HOME=/var/lib/signal-player
-export XDG_CONFIG_HOME="$HOME/.config"
-export XDG_CACHE_HOME="$HOME/.cache"
+# Raspberry Pi OS normally owns the graphical session with a regular local
+# account. Keep that account's Wayland/X session and writable home directory.
+# The dedicated service account still uses its private state directory when it
+# is the account that starts the kiosk.
+if [ "$(id -un)" = "signal-player" ]; then
+  export HOME=/var/lib/signal-player
+fi
+
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 
 while true; do

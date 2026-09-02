@@ -75,7 +75,7 @@ class RaspberryPiPlatform(PlayerPlatform):
 
     def renderer_status(self) -> str:
         try:
-            result = subprocess.run(["pgrep", "-u", "signal-player", "-f", "chromium"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            result = subprocess.run(["pgrep", "-f", "chromium.*127.0.0.1:8090/player"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             return "running" if result.returncode == 0 else "not_running"
         except OSError:
             return "unknown"
