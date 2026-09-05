@@ -147,6 +147,21 @@ def test_web_links_and_resolution_commands_are_player_ready(client):
         json={"name": "Board Slides", "url": "https://docs.google.com/presentation/d/example/embed"},
     )
     assert link.status_code == 201
+    website = link.json()["published_version"]["design_document"]["elements"][0]
+    assert website["refresh"] == {"mode": "hourly"}
+    custom = test_client.post(
+        "/api/v1/content/web-link",
+        headers=headers,
+        json={"name": "Quarter-hour Board", "url": "https://example.org/board", "refresh_mode": "interval", "refresh_interval_minutes": 15},
+    )
+    assert custom.status_code == 201
+    assert custom.json()["published_version"]["design_document"]["elements"][0]["refresh"] == {"mode": "interval", "interval_minutes": 15}
+    invalid = test_client.post(
+        "/api/v1/content/web-link",
+        headers=headers,
+        json={"name": "Incomplete interval", "url": "https://example.org/invalid", "refresh_mode": "interval"},
+    )
+    assert invalid.status_code == 422
     library = test_client.get("/api/v1/library?kind=web", headers=headers).json()
     assert any(item["id"] == link.json()["id"] and item["status"] == "Published" for item in library)
 

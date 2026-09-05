@@ -100,6 +100,11 @@ type DesignElement = {
   url?: string;
   media_id?: string;
   style?: Record<string, string | number>;
+  refresh?: {
+    mode?: "hourly" | "interval" | "manual";
+    interval_minutes?: number;
+    intervalMinutes?: number;
+  };
 };
 type Media = {
   id: string;
@@ -764,6 +769,7 @@ function MediaView({
   const [trashItem, setTrashItem] = useState<LibraryItem | null>(null);
   const [deleteItem, setDeleteItem] = useState<LibraryItem | null>(null);
   const [editWebLink, setEditWebLink] = useState<LibraryItem | null>(null);
+  const [webRefreshMode, setWebRefreshMode] = useState<"hourly" | "interval" | "manual">("hourly");
   const reload = useCallback(
     () =>
       Promise.all([
@@ -813,9 +819,10 @@ function MediaView({
     const form = new FormData(formElement);
     setBusy(true);
     try {
-      await request("/content/web-link", token, { method: "POST", body: JSON.stringify({ name: form.get("name"), url: form.get("url") }) });
+      await request("/content/web-link", token, { method: "POST", body: JSON.stringify({ name: form.get("name"), url: form.get("url"), refresh_mode: webRefreshMode, refresh_interval_minutes: webRefreshMode === "interval" ? Number(form.get("refresh_interval_minutes")) : null }) });
       notify("Web link added to Library and published.");
       formElement.reset();
+      setWebRefreshMode("hourly");
       setWebLinkOpen(false);
       reload();
     } catch (reason) {
@@ -892,6 +899,8 @@ function MediaView({
         <form onSubmit={createWebLink} className="inline-form">
           <input name="name" placeholder="e.g. Board presentation" required />
           <input name="url" type="url" placeholder="https://docs.google.com/presentation/.../embed" required />
+          <label>Automatic refresh<select value={webRefreshMode} onChange={(event) => setWebRefreshMode(event.target.value as "hourly" | "interval" | "manual")}><option value="hourly">Top of every hour</option><option value="interval">Custom interval</option><option value="manual">Only when Force Sync is used</option></select></label>
+          {webRefreshMode === "interval" && <label>Refresh every <input name="refresh_interval_minutes" type="number" min="5" max="1440" defaultValue="60" required /> minutes</label>}
           <button className="primary" disabled={busy}>{busy ? "Adding…" : "Add web link"}</button>
         </form>
       </section>}
@@ -979,13 +988,18 @@ function MediaView({
 function WebLinkEditorDialog({ item, token, onClose, onSaved }: { item: LibraryItem; token: string; onClose: () => void; onSaved: (message: string) => void }) {
   const [name, setName] = useState(item.name);
   const [url, setUrl] = useState("");
+  const [refreshMode, setRefreshMode] = useState<"hourly" | "interval" | "manual">("hourly");
+  const [refreshInterval, setRefreshInterval] = useState("60");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     request<ContentItem[]>("/content", token)
       .then((content) => {
         const document = content.find((entry) => entry.id === item.id)?.published_version?.design_document;
-        setUrl(document?.elements.find((element) => element.type === "website")?.text || "");
+        const element = document?.elements.find((entry) => entry.type === "website");
+        setUrl(element?.text || "");
+        setRefreshMode(element?.refresh?.mode || "hourly");
+        setRefreshInterval(String(element?.refresh?.interval_minutes || element?.refresh?.intervalMinutes || 60));
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "Unable to load this web link."));
   }, [item.id, token]);
@@ -994,13 +1008,13 @@ function WebLinkEditorDialog({ item, token, onClose, onSaved }: { item: LibraryI
     setBusy(true);
     setError("");
     try {
-      await request(`/content/${item.id}/web-link`, token, { method: "PATCH", body: JSON.stringify({ name, url }) });
+      await request(`/content/${item.id}/web-link`, token, { method: "PATCH", body: JSON.stringify({ name, url, refresh_mode: refreshMode, refresh_interval_minutes: refreshMode === "interval" ? Number(refreshInterval) : null }) });
       onSaved(`“${name}” was updated and sent to its assigned displays.`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to update web link.");
     } finally { setBusy(false); }
   };
-  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="edit-web-link-title"><header><div><p className="eyebrow">WEB LINK</p><h2 id="edit-web-link-title">Edit web link</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={save}><label>Name<input value={name} onChange={(event) => setName(event.target.value)} required /></label><label>Embed URL<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://docs.google.com/presentation/.../embed" required /><small>Use the published embed URL for Google Slides, not the editor link.</small></label>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save web link"}</button></footer></form></section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="edit-web-link-title"><header><div><p className="eyebrow">WEB LINK</p><h2 id="edit-web-link-title">Edit web link</h2></div><button className="close" aria-label="Close" onClick={onClose}>×</button></header><form onSubmit={save}><label>Name<input value={name} onChange={(event) => setName(event.target.value)} required /></label><label>Embed URL<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://docs.google.com/presentation/.../embed" required /><small>Use the published embed URL for Google Slides, not the editor link.</small></label><label>Automatic refresh<select value={refreshMode} onChange={(event) => setRefreshMode(event.target.value as "hourly" | "interval" | "manual")}><option value="hourly">Top of every hour</option><option value="interval">Custom interval</option><option value="manual">Only when Force Sync is used</option></select></label>{refreshMode === "interval" && <label>Refresh every <input type="number" min="5" max="1440" value={refreshInterval} onChange={(event) => setRefreshInterval(event.target.value)} required /> minutes</label>}<small>Force Sync always reloads this web link immediately.</small>{error && <p className="enrollment-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save web link"}</button></footer></form></section></div>;
 }
 
 function TrashLibraryDialog({ item, token, onClose, onDone }: { item: LibraryItem; token: string; onClose: () => void; onDone: (message: string) => void }) {
@@ -1152,7 +1166,7 @@ function PlayerDetailsView({
           return;
         }
         if (status.status === "completed") {
-          setSyncStatus(status.result?.state === "already_up_to_date" ? "Already up to date" : "Synced");
+          setSyncStatus(status.result?.web_content === "reloaded" ? "Synced · web links reloaded" : status.result?.state === "already_up_to_date" ? "Already up to date" : "Synced");
           load();
           return;
         }
@@ -2590,7 +2604,7 @@ function DesignerScreen({
   const addSlide = () => { const next = [...slides, { id: newClientId(), name: `Slide ${slides.length + 1}`, duration_seconds: 10, canvas: { width: 1920, height: 1080, background: "#172d43" }, elements: [] }]; persistSlides(next); setSlideIndex(next.length - 1); };
   const duplicateSlide = () => { if (!activeSlide) return; const copy = { ...activeSlide, id: newClientId(), name: `${activeSlide.name || `Slide ${activeIndex + 1}`} copy`, elements: activeSlide.elements.map((element) => ({ ...element, id: newClientId(), style: { ...element.style } })) }; const next = [...slides.slice(0, activeIndex + 1), copy, ...slides.slice(activeIndex + 1)]; persistSlides(next); setSlideIndex(activeIndex + 1); };
   const removeSlide = () => { if (slides.length < 2) return; const next = slides.filter((_, index) => index !== activeIndex); persistSlides(next); setSlideIndex(Math.max(0, activeIndex - 1)); };
-  const appendAssets = (assets: { kind: "image" | "video" | "pdf" | "website"; name: string; assetId?: string }[]) => {
+  const appendAssets = (assets: { kind: "image" | "video" | "pdf" | "website"; name: string; assetId?: string; refresh?: DesignElement["refresh"] }[]) => {
     if (!activeSlide || !assets.length) return;
     const elements = assets.map((asset, index) => ({
       id: newClientId(),
@@ -2603,6 +2617,7 @@ function DesignerScreen({
       height: asset.kind === "pdf" ? 700 : 510,
       z_index: activeSlide.elements.length + index + 1,
       style: { fill: asset.kind === "website" ? "#edf4fb" : "#dbe5f0", fit: "contain" },
+      ...(asset.kind === "website" ? { refresh: asset.refresh || { mode: "hourly" } } : {}),
     } as DesignElement));
     persistSlides(slides.map((slide, index) => index === activeIndex ? { ...slide, elements: [...slide.elements, ...elements] } : slide));
   };
@@ -2610,13 +2625,16 @@ function DesignerScreen({
     if (!activeSlide || !assetType) return;
     let name = item.name;
     let assetId: string | undefined = item.id;
+    let refresh: DesignElement["refresh"] | undefined;
     if (assetType === "website") {
       const content = await request<ContentItem[]>("/content", token);
       const source = content.find((entry) => entry.id === item.id)?.published_version?.design_document || content.find((entry) => entry.id === item.id)?.draft_version?.design_document;
-      name = source?.elements.find((element) => element.type === "website")?.text || "https://example.org";
+      const element = source?.elements.find((entry) => entry.type === "website");
+      name = element?.text || "https://example.org";
+      refresh = element?.refresh;
       assetId = undefined;
     }
-    appendAssets([{ kind: assetType, name, assetId }]);
+    appendAssets([{ kind: assetType, name, assetId, refresh }]);
     setAssetType(null);
     notify(`${item.name} added to slide ${activeIndex + 1}.`);
   };

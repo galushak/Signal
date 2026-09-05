@@ -24,6 +24,23 @@ class EnrollmentClient:
         return Reply({"player_id": "player-1", "device_secret": "secret"})
 
 
+class CommandReply(Reply):
+    def raise_for_status(self):
+        return None
+
+
+class CommandClient:
+    def __init__(self):
+        self.results = []
+
+    def get(self, *_args, **_kwargs):
+        return CommandReply([{"id": "command-1", "command": "force_sync"}])
+
+    def post(self, url, json, **_kwargs):
+        self.results.append((url, json))
+        return CommandReply({})
+
+
 def test_server_generated_code_enrolls_and_identity_survives_restart(tmp_path):
     config_path = tmp_path / "etc" / "config.toml"
     agent = PlayerAgent(state_dir=tmp_path / "state", api_url="http://signal", platform=PlayerPlatform(), config_path=config_path)
@@ -63,8 +80,30 @@ def test_direct_media_frame_maps_fit_and_fill_without_grid_sizing():
     assert "display:grid;place-items:center" not in media_frame
 
 
+def test_force_sync_refreshes_web_iframes_without_restarting_the_renderer(tmp_path):
+    agent = PlayerAgent(state_dir=tmp_path / "state", api_url="http://signal", platform=PlayerPlatform(), config_path=tmp_path / "config.toml")
+    token = agent.refresh_web_content()
+    assert agent.runtime["web_content_refresh_token"] == token
+    restarted = PlayerAgent(state_dir=tmp_path / "state", api_url="http://signal", platform=PlayerPlatform(), config_path=tmp_path / "config.toml")
+    assert restarted.runtime["web_content_refresh_token"] == token
+    assert "function refreshSlot" in PLAYER_HTML
+    assert "_signal_refresh" in PLAYER_HTML
+
+
+def test_force_sync_acknowledges_the_web_content_reload(tmp_path):
+    agent = PlayerAgent(state_dir=tmp_path / "state", api_url="http://signal", platform=PlayerPlatform(), config_path=tmp_path / "config.toml")
+    agent.identity.update({"player_id": "player-1", "device_secret": "secret"})
+    agent.sync = lambda: False  # type: ignore[method-assign]
+    client = CommandClient()
+    agent.client = client
+    agent.commands()
+    assert client.results[0][1]["status"] == "completed"
+    assert client.results[0][1]["result"]["state"] == "already_up_to_date"
+    assert client.results[0][1]["result"]["web_content"] == "reloaded"
+
+
 def test_player_version_is_explicit_and_used_by_cli(capsys):
-    assert PLAYER_VERSION == "0.1.0-rc5"
+    assert PLAYER_VERSION == "0.1.0-rc6"
     assert cli_main(["version"]) == 0
     assert capsys.readouterr().out.strip() == PLAYER_VERSION
 

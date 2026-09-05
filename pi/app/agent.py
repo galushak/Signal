@@ -236,7 +236,8 @@ class PlayerAgent:
             try:
                 if command["command"] == "force_sync":
                     changed = self.sync()
-                    result = {"state": "synced" if changed else "already_up_to_date"}
+                    refresh_token = self.refresh_web_content()
+                    result = {"state": "synced" if changed else "already_up_to_date", "web_content": "reloaded", "refresh_token": refresh_token}
                 elif command["command"] == "restart_renderer": status, result = self.platform.restart_renderer()
                 elif command["command"] == "clear_cache": shutil.rmtree(self.media_dir, ignore_errors=True); status, result = "completed", {"cache": "cleared"}
                 elif command["command"] == "set_resolution": status, result = self.platform.set_resolution((command.get("payload") or {}).get("resolution", ""))
@@ -244,6 +245,19 @@ class PlayerAgent:
             except Exception as exc:  # retain active manifest when commands fail
                 status, result = "failed", {"error": str(exc)}
             self.client.post(f"{self.api_url}/player-agent/commands/{command['id']}/result", headers=self.headers(), json={"status": status, "result": result}).raise_for_status()
+
+    def refresh_web_content(self) -> str:
+        """Cause the kiosk to replace external iframes without restarting it.
+
+        The browser's player page polls this runtime state. A new token becomes
+        part of each web iframe URL, bypassing browser cache and reloading the
+        current Google Slides publication after a Force Sync.
+        """
+        token = uuid.uuid4().hex
+        self.runtime["web_content_refresh_token"] = token
+        self.runtime["web_content_refreshed_at"] = int(time.time())
+        self._save_runtime()
+        return token
 
     def cycle(self, *, sync_state: bool = True) -> None:
         try:

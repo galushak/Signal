@@ -25,6 +25,11 @@ export type DesignerElement = {
   opacity?: number;
   rotation?: number;
   style?: Record<string, string | number>;
+  refresh?: {
+    mode?: "hourly" | "interval" | "manual";
+    interval_minutes?: number;
+    intervalMinutes?: number;
+  };
 };
 export type DesignerDocument = {
   schema: "signal.design/v1";
@@ -125,6 +130,7 @@ function makeElement(type: string, index: number): DesignerElement {
       width: 640,
       height: 360,
       style: { fill: "#edf4fb" },
+      refresh: { mode: "hourly" },
     },
     qr: {
       type: "qr",
@@ -725,6 +731,7 @@ export function SignalDesigner({
           {panel === "design" && (active ? <>
             <p className="inspector-heading">{active.type === "text" ? "Text" : active.type[0].toUpperCase() + active.type.slice(1)}</p>
             <label>Text<textarea value={active.text || ""} onChange={(event) => update(active.id, { text: event.target.value })} /></label>
+            {active.type === "website" && <div className="designer-control-group"><label>Automatic refresh<select value={active.refresh?.mode || "hourly"} onChange={(event) => update(active.id, { refresh: { ...active.refresh, mode: event.target.value as "hourly" | "interval" | "manual" } })}><option value="hourly">Top of every hour</option><option value="interval">Custom interval</option><option value="manual">Only when Force Sync is used</option></select></label>{(active.refresh?.mode || "hourly") === "interval" && <label>Refresh every <input type="number" min="5" max="1440" value={active.refresh?.interval_minutes || active.refresh?.intervalMinutes || 60} onChange={(event) => update(active.id, { refresh: { ...active.refresh, mode: "interval", interval_minutes: Math.min(1440, Math.max(5, Number(event.target.value) || 60)) } })} /> minutes</label>}<small>Web content reloads at the selected time. Force Sync reloads it immediately.</small></div>}
             <div className="studio-field-row"><label>Color<input type="color" value={String(active.style?.fill || "#ffffff")} onChange={(event) => update(active.id, { style: { ...active.style, fill: event.target.value } })} /></label><label>Rotation<input type="number" value={active.rotation || 0} onChange={(event) => update(active.id, { rotation: Number(event.target.value) })} /></label></div>
             {supportsTextStyle && <>
               <label>Font size<input type="number" value={Number(active.style?.fontSize || 44)} onChange={(event) => applyStyle({ fontSize: Number(event.target.value) })} /></label>

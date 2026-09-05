@@ -125,6 +125,8 @@ class CommandInput(BaseModel):
 class WebLinkInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     url: str = Field(min_length=8, max_length=2048, pattern=r"^https?://")
+    refresh_mode: str = Field(default="hourly", pattern=r"^(hourly|interval|manual)$")
+    refresh_interval_minutes: int | None = Field(default=None, ge=5, le=1440)
 
 
 class CommandResultInput(BaseModel):
@@ -1284,6 +1286,19 @@ def valid_design(document: dict) -> None:
     if any(not isinstance(element_id, str) or not element_id for element_id in ids) or len(ids) != len(set(ids)): raise HTTPException(status_code=422, detail="Every design element needs a stable unique ID.")
 
 
+def web_refresh_settings(payload: WebLinkInput) -> dict:
+    """Store a player-readable refresh rule directly with the web element.
+
+    Legacy web links have no rule and are intentionally treated as hourly by
+    the player, so existing Google Slides begin refreshing without migration.
+    """
+    if payload.refresh_mode == "interval":
+        if not payload.refresh_interval_minutes:
+            raise HTTPException(status_code=422, detail="Choose a refresh interval between 5 minutes and 24 hours.")
+        return {"mode": "interval", "interval_minutes": payload.refresh_interval_minutes}
+    return {"mode": payload.refresh_mode}
+
+
 def content_for_user(content_id: str, capability: str, user: User, db: Session) -> Content:
     item = db.get(Content, content_id)
     if not item or item.trashed_at: raise HTTPException(status_code=404, detail="Content not found.")
@@ -1401,16 +1416,17 @@ def create_web_link(payload: WebLinkInput, request: Request, user: User = Depend
     require(user, "publish", DISTRICT, None, db)
     name = clean_text(payload.name, "Name", 160)
     url = payload.url.strip()
+    refresh = web_refresh_settings(payload)
     document = {
         "schema": "signal.design/v1",
         "canvas": {"width": 1920, "height": 1080, "background": "#000000"},
-        "elements": [{"id": str(uuid.uuid4()), "type": "website", "text": url, "x": 0, "y": 0, "width": 1920, "height": 1080, "z_index": 1}],
+        "elements": [{"id": str(uuid.uuid4()), "type": "website", "text": url, "x": 0, "y": 0, "width": 1920, "height": 1080, "z_index": 1, "refresh": refresh}],
     }
     valid_design(document)
     item = Content(name=name, content_type="web_link", scope_type=DISTRICT, scope_id=None, created_by_id=user.id)
     db.add(item); db.flush()
     db.add(ContentVersion(content_id=item.id, revision=1, state="published", design_document=document, note="Library web link", created_by_id=user.id))
-    record(db, actor=user, action="content.web_link_created", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=DISTRICT, scope_id=None, source_ip=auth.client_ip(request), metadata={"url": url})
+    record(db, actor=user, action="content.web_link_created", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=DISTRICT, scope_id=None, source_ip=auth.client_ip(request), metadata={"url": url, "refresh": refresh})
     db.commit()
     return content_data(item, db)
 
@@ -1428,10 +1444,11 @@ def update_web_link(content_id: str, payload: WebLinkInput, request: Request, us
         raise HTTPException(status_code=422, detail="This library item is not a web link.")
     name = clean_text(payload.name, "Name", 160)
     url = payload.url.strip()
+    refresh = web_refresh_settings(payload)
     document = {
         "schema": "signal.design/v1",
         "canvas": {"width": 1920, "height": 1080, "background": "#000000"},
-        "elements": [{"id": str(uuid.uuid4()), "type": "website", "text": url, "x": 0, "y": 0, "width": 1920, "height": 1080, "z_index": 1}],
+        "elements": [{"id": str(uuid.uuid4()), "type": "website", "text": url, "x": 0, "y": 0, "width": 1920, "height": 1080, "z_index": 1, "refresh": refresh}],
     }
     valid_design(document)
     for prior in db.scalars(select(ContentVersion).where(ContentVersion.content_id == item.id, ContentVersion.state == "published")):
@@ -1442,7 +1459,7 @@ def update_web_link(content_id: str, payload: WebLinkInput, request: Request, us
     db.add(version)
     for assignment in db.scalars(select(ContentAssignment).where(ContentAssignment.content_id == item.id)):
         refresh_desired_state(assignment.destination_type, assignment.destination_id, db)
-    record(db, actor=user, action="content.web_link_updated", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"url": url, "revision": revision})
+    record(db, actor=user, action="content.web_link_updated", resource_type="content", resource_id=item.id, resource_name=item.name, scope_type=item.scope_type, scope_id=item.scope_id, source_ip=auth.client_ip(request), metadata={"url": url, "refresh": refresh, "revision": revision})
     db.commit()
     return content_data(item, db)
 
