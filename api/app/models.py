@@ -25,6 +25,9 @@ class AppSettings(Timestamped, Base):
     organization_name: Mapped[str] = mapped_column(String(160), default="Signal")
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     default_slide_duration_seconds: Mapped[int] = mapped_column(Integer, default=20)
+    # Playlists are an optional, scheduled playback feature. Keeping the
+    # switch here makes its default durable for every installation.
+    playlists_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     setup_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

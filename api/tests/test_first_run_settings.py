@@ -50,7 +50,7 @@ def setup_payload(**changes):
 
 def test_fresh_install_setup_creates_admin_settings_and_session(fresh_client):
     client, session_factory = fresh_client
-    assert client.get("/api/v1/setup/status").json() == {"setup_required": True, "organization_name": None}
+    assert client.get("/api/v1/setup/status").json() == {"setup_required": True, "organization_name": None, "playlists_enabled": False}
 
     response = client.post("/api/v1/setup", json=setup_payload())
     assert response.status_code == 201
@@ -58,8 +58,9 @@ def test_fresh_install_setup_creates_admin_settings_and_session(fresh_client):
     assert result["user"]["super_admin"] is True
     assert result["user"]["username"] == "admin"
     assert result["settings"]["organization_name"] == "Signal Test School"
+    assert result["settings"]["playlists_enabled"] is False
     assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {result['access_token']}"}).status_code == 200
-    assert client.get("/api/v1/setup/status").json() == {"setup_required": False, "organization_name": "Signal Test School"}
+    assert client.get("/api/v1/setup/status").json() == {"setup_required": False, "organization_name": "Signal Test School", "playlists_enabled": False}
 
     with session_factory() as db:
         saved = db.get(AppSettings, 1)
@@ -95,7 +96,7 @@ def test_existing_user_install_is_not_sent_to_setup(fresh_client):
     with session_factory() as db:
         db.add(User(username="existing", display_name="Existing", password_hash=auth.hash_password("legacy password"), super_admin=True))
         db.commit()
-    assert client.get("/api/v1/setup/status").json() == {"setup_required": False, "organization_name": "Signal"}
+    assert client.get("/api/v1/setup/status").json() == {"setup_required": False, "organization_name": "Signal", "playlists_enabled": False}
     with session_factory() as db:
         assert db.get(AppSettings, 1).setup_completed_at is not None
 
@@ -105,9 +106,10 @@ def test_settings_authorization_and_validation(fresh_client):
     setup = client.post("/api/v1/setup", json=setup_payload()).json()
     headers = {"Authorization": f"Bearer {setup['access_token']}"}
     assert client.get("/api/v1/settings", headers=headers).json()["default_slide_duration_seconds"] == 20
-    updated = client.patch("/api/v1/settings", headers=headers, json={"organization_name": "North Campus", "timezone": "America/New_York", "default_slide_duration_seconds": 15})
+    assert client.get("/api/v1/settings", headers=headers).json()["playlists_enabled"] is False
+    updated = client.patch("/api/v1/settings", headers=headers, json={"organization_name": "North Campus", "timezone": "America/New_York", "default_slide_duration_seconds": 15, "playlists_enabled": True})
     assert updated.status_code == 200
-    assert updated.json() == {"organization_name": "North Campus", "timezone": "America/New_York", "default_slide_duration_seconds": 15}
+    assert updated.json() == {"organization_name": "North Campus", "timezone": "America/New_York", "default_slide_duration_seconds": 15, "playlists_enabled": True}
     assert client.patch("/api/v1/settings", headers=headers, json={"timezone": "Not/A_Timezone"}).status_code == 422
     assert client.get("/api/v1/settings").status_code == 401
 

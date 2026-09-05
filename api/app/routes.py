@@ -66,6 +66,7 @@ class SettingsUpdate(BaseModel):
     organization_name: str | None = Field(default=None, max_length=160)
     timezone: str | None = Field(default=None, max_length=64)
     default_slide_duration_seconds: int | None = Field(default=None, ge=1, le=3600)
+    playlists_enabled: bool | None = None
 
 
 class GrantInput(BaseModel):
@@ -246,6 +247,7 @@ def settings_data(item: AppSettings) -> dict:
         "organization_name": item.organization_name,
         "timezone": item.timezone,
         "default_slide_duration_seconds": item.default_slide_duration_seconds,
+        "playlists_enabled": item.playlists_enabled,
     }
 
 
@@ -261,6 +263,19 @@ def application_settings(db: Session) -> AppSettings | None:
             db.rollback()
             item = db.get(AppSettings, 1)
     return item
+
+
+def playlists_are_enabled(db: Session) -> bool:
+    item = application_settings(db)
+    return bool(item and item.playlists_enabled)
+
+
+def require_playlists_enabled(db: Session) -> None:
+    if not playlists_are_enabled(db):
+        raise HTTPException(
+            status_code=409,
+            detail="Playlists are disabled. Enable them in Settings to use scheduled playlists.",
+        )
 
 
 def clean_text(value: str, field_name: str, maximum: int) -> str:
@@ -340,7 +355,11 @@ def media_type_for(upload: UploadFile) -> str:
 def setup_status(db: Session = Depends(get_db)):
     item = application_settings(db)
     completed = bool(item and item.setup_completed_at)
-    return {"setup_required": not completed, "organization_name": item.organization_name if completed else None}
+    return {
+        "setup_required": not completed,
+        "organization_name": item.organization_name if completed else None,
+        "playlists_enabled": bool(item and item.playlists_enabled),
+    }
 
 
 @router.post("/setup", status_code=201)
@@ -419,6 +438,13 @@ def update_application_settings(payload: SettingsUpdate, request: Request, user:
         item.timezone = payload.timezone
     if payload.default_slide_duration_seconds is not None:
         item.default_slide_duration_seconds = payload.default_slide_duration_seconds
+    if payload.playlists_enabled is not None:
+        item.playlists_enabled = payload.playlists_enabled
+    if before["playlists_enabled"] != item.playlists_enabled:
+        # Disabling playlists removes scheduled rotations from the next player
+        # manifest; enabling restores them without changing stored schedules.
+        for player in db.scalars(select(Player).where(Player.archived_at.is_(None))):
+            player.desired_state_revision = build_manifest(player, db)["revision"]
     record(db, actor=user, action="system.settings_updated", resource_type="app_settings", resource_id="1", resource_name=item.organization_name, source_ip=auth.client_ip(request), metadata={"before": before, "after": settings_data(item)})
     db.commit()
     db.refresh(item)
@@ -1627,12 +1653,14 @@ def list_destinations(user: User = Depends(auth.get_current_user), db: Session =
 
 @router.get("/playlists")
 def list_playlists(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require_playlists_enabled(db)
     require(user, "view", DISTRICT, None, db)
     return [playlist_data(item, db) for item in db.scalars(select(Playlist).order_by(Playlist.updated_at.desc()))]
 
 
 @router.post("/playlists", status_code=201)
 def create_playlist(payload: PlaylistInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require_playlists_enabled(db)
     require(user, "create_content", DISTRICT, None, db)
     item = Playlist(name=clean_text(payload.name, "Playlist name", 160), description=payload.description.strip() if payload.description else None, kind="announcement", enabled=payload.enabled, created_by_id=user.id)
     db.add(item); db.flush()
@@ -1643,6 +1671,7 @@ def create_playlist(payload: PlaylistInput, request: Request, user: User = Depen
 
 @router.get("/playlists/{playlist_id}")
 def get_playlist(playlist_id: str, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require_playlists_enabled(db)
     require(user, "view", DISTRICT, None, db)
     item = db.get(Playlist, playlist_id)
     if not item: raise HTTPException(status_code=404, detail="Playlist not found.")
@@ -1651,6 +1680,7 @@ def get_playlist(playlist_id: str, user: User = Depends(auth.get_current_user), 
 
 @router.post("/playlists/{playlist_id}/items", status_code=201)
 def add_playlist_item(playlist_id: str, payload: PlaylistItemInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require_playlists_enabled(db)
     require(user, "create_content", DISTRICT, None, db)
     playlist = db.get(Playlist, playlist_id)
     if not playlist: raise HTTPException(status_code=404, detail="Playlist not found.")
@@ -1676,6 +1706,7 @@ def add_playlist_item(playlist_id: str, payload: PlaylistItemInput, request: Req
 
 @router.delete("/playlists/{playlist_id}/items/{item_id}")
 def delete_playlist_item(playlist_id: str, item_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require_playlists_enabled(db)
     require(user, "edit_content", DISTRICT, None, db)
     entry = db.get(PlaylistItem, item_id)
     if not entry or entry.playlist_id != playlist_id: raise HTTPException(status_code=404, detail="Playlist item not found.")
@@ -1690,6 +1721,7 @@ def delete_playlist_item(playlist_id: str, item_id: str, request: Request, user:
 
 @router.post("/playlists/{playlist_id}/assignments", status_code=201)
 def assign_playlist(playlist_id: str, payload: PlaylistAssignmentInput, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require_playlists_enabled(db)
     if payload.destination_type not in {PLAYER, ZONE}: raise HTTPException(status_code=422, detail="Choose a player or zone destination.")
     scope_valid(payload.destination_type, payload.destination_id, db); require(user, "schedule", payload.destination_type, payload.destination_id, db)
     playlist = db.get(Playlist, playlist_id)
@@ -1707,6 +1739,7 @@ def assign_playlist(playlist_id: str, payload: PlaylistAssignmentInput, request:
 
 @router.delete("/playlists/{playlist_id}/assignments/{assignment_id}")
 def remove_playlist_assignment(playlist_id: str, assignment_id: str, request: Request, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    require_playlists_enabled(db)
     entry = db.get(PlaylistAssignment, assignment_id)
     if not entry or entry.playlist_id != playlist_id: raise HTTPException(status_code=404, detail="Playlist schedule not found.")
     require(user, "schedule", entry.destination_type, entry.destination_id, db)

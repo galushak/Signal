@@ -184,6 +184,11 @@ def test_web_links_and_resolution_commands_are_player_ready(client):
 def test_web_link_edits_and_scheduled_playlists_build_a_base_safe_manifest(client):
     test_client, ids = client
     headers = {"Authorization": f"Bearer {login(test_client, 'admin')}"}
+    # The optional feature begins disabled on every Signal installation.
+    assert test_client.get("/api/v1/playlists", headers=headers).status_code == 409
+    enabled = test_client.patch("/api/v1/settings", headers=headers, json={"playlists_enabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["playlists_enabled"] is True
     prepared = prepare(test_client, headers, ids["high"], "Playlist manifest display")
     credentials = enroll_device(test_client, prepared["enrollment"]["code"], "playlist-manifest-device").json()
     player_id = prepared["player"]["id"]
@@ -219,3 +224,9 @@ def test_web_link_edits_and_scheduled_playlists_build_a_base_safe_manifest(clien
     refreshed = test_client.get("/api/v1/player-agent/manifest", headers=device_headers).json()["content"]
     link_entry = next(entry for entry in refreshed if entry["name"] == "Updated Board Slides")
     assert link_entry["design"]["elements"][0]["text"] == "https://docs.google.com/presentation/d/new/embed"
+
+    disabled = test_client.patch("/api/v1/settings", headers=headers, json={"playlists_enabled": False})
+    assert disabled.status_code == 200
+    paused = test_client.get("/api/v1/player-agent/manifest", headers=device_headers).json()["content"]
+    assert any(entry["name"] == "Base rotation" for entry in paused)
+    assert not any(entry.get("playlist", {}).get("id") == playlist_id for entry in paused)

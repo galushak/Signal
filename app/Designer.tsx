@@ -163,12 +163,14 @@ export function SignalDesigner({
   document,
   onChange,
   onPickAsset,
+  onUploadMedia,
   slideDuration = 10,
   onSlideDurationChange,
 }: {
   document: DesignerDocument;
   onChange: (document: DesignerDocument) => void;
   onPickAsset?: (type: "image" | "video" | "pdf" | "website") => void;
+  onUploadMedia?: () => void;
   slideDuration?: number;
   onSlideDurationChange?: (duration: number) => void;
 }) {
@@ -628,8 +630,11 @@ export function SignalDesigner({
           <div className="studio-toolset">
             <button onClick={() => add("body")} title="Insert text"><strong>T</strong><span>Text</span></button>
             <button onClick={() => onPickAsset ? onPickAsset("image") : add("image")} title="Add image from Library"><strong>▧</strong><span>Image</span></button>
+            <button onClick={() => onPickAsset ? onPickAsset("video") : add("video")} title="Add video from Library"><strong>▷</strong><span>Video</span></button>
+            <button onClick={() => onPickAsset ? onPickAsset("pdf") : add("pdf")} title="Add PDF from Library"><strong>▤</strong><span>PDF</span></button>
             <button onClick={() => add("shape")} title="Insert shape"><strong>◇</strong><span>Shape</span></button>
             <button onClick={() => onPickAsset ? onPickAsset("website") : add("website")} title="Insert web link"><strong>↗</strong><span>Web link</span></button>
+            {onUploadMedia && <button onClick={onUploadMedia} title="Upload images, video, or PDFs"><strong>↑</strong><span>Upload</span></button>}
             <label className="studio-background" title="Canvas background"><i style={{ background: document.canvas.background || "#172d43" }} /><span>Background</span><input type="color" value={document.canvas.background || "#172d43"} onChange={(event) => changeCanvasBackground(event.target.value)} /></label>
           </div>
           <div className="studio-history">

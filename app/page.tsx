@@ -157,11 +157,13 @@ type Dashboard = {
 type SetupStatus = {
   setup_required: boolean;
   organization_name: string | null;
+  playlists_enabled: boolean;
 };
 type AppSettings = {
   organization_name: string;
   timezone: string;
   default_slide_duration_seconds: number;
+  playlists_enabled: boolean;
 };
 
 function AuthenticatedThumbnail({ thumbnailUrl, token, label, alt, fit = "cover" }: { thumbnailUrl?: string; token: string; label: string; alt: string; fit?: "contain" | "cover" }) {
@@ -310,6 +312,11 @@ export function SignalApp() {
     const target = setupStatus.setup_required ? "/setup" : token && user ? "/" : "/login";
     if (window.location.pathname !== target) window.history.replaceState({}, "", target);
   }, [setupStatus, token, user]);
+  useEffect(() => {
+    if (setupStatus && !setupStatus.playlists_enabled && view === "playlists") {
+      setView("dashboard");
+    }
+  }, [setupStatus, view]);
   const openLibraryDesign = useCallback((id: string) => {
     setLibraryDesignId(id);
     setView("content");
@@ -345,7 +352,7 @@ export function SignalApp() {
       <Setup
         onComplete={(result) => {
           localStorage.setItem("signal_token", result.access_token);
-          setSetupStatus({ setup_required: false, organization_name: result.settings.organization_name });
+          setSetupStatus({ setup_required: false, organization_name: result.settings.organization_name, playlists_enabled: result.settings.playlists_enabled });
           setToken(result.access_token);
           setUser(result.user);
           setView("dashboard");
@@ -365,6 +372,7 @@ export function SignalApp() {
     );
   const organizationName = setupStatus.organization_name || "Signal";
   const canManageSettings = user.role === "super_admin" || user.role === "admin";
+  const playlistsEnabled = setupStatus.playlists_enabled;
   const show = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 4000);
@@ -372,10 +380,10 @@ export function SignalApp() {
   const navigation = [
     ["dashboard", "▦", "Dashboard"],
     ["media", "◫", "Library"],
-    ["playlists", "☷", "Playlists"],
     ["players", "▣", "Players"],
     ["buildings", "⌂", "Buildings"],
   ];
+  if (playlistsEnabled) navigation.splice(2, 0, ["playlists", "☷", "Playlists"]);
   if (user.role === "super_admin")
     navigation.push(
       ["users", "♙", "Users & access"],
@@ -464,6 +472,7 @@ export function SignalApp() {
               onInitialContentOpened={() => setLibraryDesignId(null)}
               onDone={() => setView("media")}
               onNavigate={setView}
+              playlistsEnabled={playlistsEnabled}
             />
           )}
           {view === "media" && (
@@ -474,7 +483,7 @@ export function SignalApp() {
               onCreateDesign={() => setView("content")}
             />
           )}
-          {view === "playlists" && <PlaylistsView token={token} notify={show} />}
+          {view === "playlists" && playlistsEnabled && <PlaylistsView token={token} notify={show} />}
           {view === "players" && (
             <PlayersView
               token={token}
@@ -496,7 +505,7 @@ export function SignalApp() {
           {view === "layouts" && <LayoutsView token={token} notify={show} />}
           {view === "users" && <UsersView token={token} notify={show} />}
           {view === "audit" && <AuditView token={token} />}
-          {view === "settings" && canManageSettings && <SettingsView token={token} onSaved={(next) => { setSetupStatus({ setup_required: false, organization_name: next.organization_name }); show("Settings saved."); }} />}
+          {view === "settings" && canManageSettings && <SettingsView token={token} onSaved={(next) => { setSetupStatus({ setup_required: false, organization_name: next.organization_name, playlists_enabled: next.playlists_enabled }); show("Settings saved."); }} />}
         </div>
       </section>
       {notice && (
@@ -2308,6 +2317,7 @@ function ContentView({
   onInitialContentOpened,
   onDone,
   onNavigate,
+  playlistsEnabled,
 }: {
   token: string;
   notify: (m: string) => void;
@@ -2315,6 +2325,7 @@ function ContentView({
   onInitialContentOpened: () => void;
   onDone: () => void;
   onNavigate: (view: string) => void;
+  playlistsEnabled: boolean;
 }) {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [selected, setSelected] = useState<ContentItem | null>(null);
@@ -2508,6 +2519,7 @@ function ContentView({
         }}
         onNavigate={onNavigate}
         onChanged={persistDesign}
+        playlistsEnabled={playlistsEnabled}
       />
     );
   return (
@@ -2577,6 +2589,7 @@ function DesignerScreen({
   onBack,
   onNavigate,
   onChanged,
+  playlistsEnabled,
 }: {
   content: ContentItem;
   document: DesignerDocument;
@@ -2585,13 +2598,13 @@ function DesignerScreen({
   onBack: () => void;
   onNavigate: (view: string) => void;
   onChanged: (document: DesignerDocument) => void;
+  playlistsEnabled: boolean;
 }) {
   const [saving, setSaving] = useState("Saved ✓");
-  const [slideIndex, setSlideIndex] = useState(0);
   const [assetType, setAssetType] = useState<"image" | "video" | "pdf" | "website" | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const slides = deckSlides(document);
-  const activeIndex = Math.min(slideIndex, Math.max(slides.length - 1, 0));
+  const activeIndex = 0;
   const activeSlide = slides[activeIndex];
   const persistSlides = (next: DeckSlide[]) => {
     setSaving("Saving…");
@@ -2601,9 +2614,6 @@ function DesignerScreen({
   const save = (next: DesignerDocument) => {
     persistSlides(slides.map((slide, index) => index === activeIndex ? { ...slide, canvas: next.canvas, elements: next.elements } : slide));
   };
-  const addSlide = () => { const next = [...slides, { id: newClientId(), name: `Slide ${slides.length + 1}`, duration_seconds: 10, canvas: { width: 1920, height: 1080, background: "#172d43" }, elements: [] }]; persistSlides(next); setSlideIndex(next.length - 1); };
-  const duplicateSlide = () => { if (!activeSlide) return; const copy = { ...activeSlide, id: newClientId(), name: `${activeSlide.name || `Slide ${activeIndex + 1}`} copy`, elements: activeSlide.elements.map((element) => ({ ...element, id: newClientId(), style: { ...element.style } })) }; const next = [...slides.slice(0, activeIndex + 1), copy, ...slides.slice(activeIndex + 1)]; persistSlides(next); setSlideIndex(activeIndex + 1); };
-  const removeSlide = () => { if (slides.length < 2) return; const next = slides.filter((_, index) => index !== activeIndex); persistSlides(next); setSlideIndex(Math.max(0, activeIndex - 1)); };
   const appendAssets = (assets: { kind: "image" | "video" | "pdf" | "website"; name: string; assetId?: string; refresh?: DesignElement["refresh"] }[]) => {
     if (!activeSlide || !assets.length) return;
     const elements = assets.map((asset, index) => ({
@@ -2636,13 +2646,13 @@ function DesignerScreen({
     }
     appendAssets([{ kind: assetType, name, assetId, refresh }]);
     setAssetType(null);
-    notify(`${item.name} added to slide ${activeIndex + 1}.`);
+    notify(`${item.name} added to this content.`);
   };
   const addUploadedMedia = (assets: Media[]) => {
     const supported = assets.filter((asset) => ["image", "video", "pdf"].includes(asset.media_type));
     appendAssets(supported.map((asset) => ({ kind: asset.media_type as "image" | "video" | "pdf", name: asset.display_name, assetId: asset.id })));
     setUploadOpen(false);
-    notify(`${supported.length === 1 ? `“${supported[0].display_name}” was` : `${supported.length} files were`} uploaded to Library and added to slide ${activeIndex + 1}.`);
+    notify(`${supported.length === 1 ? `“${supported[0].display_name}” was` : `${supported.length} files were`} uploaded to Library and added to this content.`);
   };
   const publish = async () => {
     try {
@@ -2664,7 +2674,7 @@ function DesignerScreen({
         <nav>
           <button onClick={onBack}><span>▦</span>Library</button>
           <button className="active"><span>▤</span>Content</button>
-          <button onClick={() => onNavigate("playlists")}><span>☷</span>Playlists</button>
+          {playlistsEnabled && <button onClick={() => onNavigate("playlists")}><span>☷</span>Playlists</button>}
           <button onClick={() => onNavigate("players")}><span>▣</span>Displays</button>
         </nav>
         <div className="designer-nav-footer"><span className="designer-nav-avatar">S</span><div><b>Signal Workspace</b><small>Content editor</small></div></div>
@@ -2681,15 +2691,7 @@ function DesignerScreen({
           </div>
         </header>
         <div className="slides-designer-layout">
-          <aside className="slide-rail">
-            <div className="slide-rail-title"><b>Slides</b><span>{slides.length}</span></div>
-            <div className="slide-list">{slides.map((slide, index) => <button key={slide.id} className={index === activeIndex ? "slide-thumb active" : "slide-thumb"} onClick={() => setSlideIndex(index)}><span className="slide-number">{index + 1}</span><span className="slide-preview" style={{ background: slide.canvas.background || "#172d43" }}>{slide.elements.slice(0, 3).map((element) => <i key={element.id} style={{ left: `${element.x / 19.2}%`, top: `${element.y / 10.8}%`, width: `${Math.max(10, element.width / 19.2)}%`, height: `${Math.max(5, element.height / 10.8)}%`, background: String(element.style?.fill || "#ffffff") }} />)}</span><small>{slide.name || `Slide ${index + 1}`}</small></button>)}</div>
-            <button className="slide-action primary" onClick={addSlide}>＋ Add slide</button>
-            <button className="slide-action secondary-button" onClick={duplicateSlide}>⧉ Duplicate</button>
-            <button className="slide-delete" onClick={removeSlide} disabled={slides.length < 2}>Delete slide</button>
-            <section className="designer-library-dock"><header><b>Library</b><span>×</span></header><div><button onClick={() => setAssetType("image")}><strong>▧</strong>Images</button><button onClick={() => setAssetType("video")}><strong>▷</strong>Video</button><button onClick={() => setAssetType("website")}><strong>↗</strong>Web link</button><button onClick={() => setAssetType("pdf")}><strong>▤</strong>PDF</button></div><button className="editor-upload-button" onClick={() => setUploadOpen(true)}>↑ Upload files</button></section>
-          </aside>
-          <section className="deck-editor"><SignalDesigner document={{ schema: "signal.design/v1", canvas: activeSlide?.canvas || { width: 1920, height: 1080 }, elements: activeSlide?.elements || [] }} onChange={save} onPickAsset={setAssetType} slideDuration={activeSlide?.duration_seconds || 10} onSlideDurationChange={updateDuration} /></section>
+          <section className="deck-editor"><SignalDesigner document={{ schema: "signal.design/v1", canvas: activeSlide?.canvas || { width: 1920, height: 1080 }, elements: activeSlide?.elements || [] }} onChange={save} onPickAsset={setAssetType} onUploadMedia={() => setUploadOpen(true)} slideDuration={activeSlide?.duration_seconds || 10} onSlideDurationChange={updateDuration} /></section>
         </div>
       </section>
       {assetType && <LibraryPickerDialog token={token} allowedKinds={assetType === "website" ? ["web"] : [assetType]} onClose={() => setAssetType(null)} onSelected={addFromLibrary} />}
@@ -3055,7 +3057,7 @@ function SettingsView({ token, onSaved }: { token: string; onSaved: (settings: A
     const form = new FormData(event.currentTarget);
     setBusy(true); setError("");
     try {
-      const next = await request("/settings", token, { method: "PATCH", body: JSON.stringify({ organization_name: form.get("organization_name"), timezone: form.get("timezone"), default_slide_duration_seconds: Number(form.get("default_slide_duration_seconds")) }) });
+      const next = await request("/settings", token, { method: "PATCH", body: JSON.stringify({ organization_name: form.get("organization_name"), timezone: form.get("timezone"), default_slide_duration_seconds: Number(form.get("default_slide_duration_seconds")), playlists_enabled: form.get("playlists_enabled") === "on" }) });
       setSettings(next); onSaved(next);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to save settings."); }
     finally { setBusy(false); }
@@ -3066,6 +3068,7 @@ function SettingsView({ token, onSaved }: { token: string; onSaved: (settings: A
     <section className="panel settings-panel"><form onSubmit={save} className="settings-form">
       <div><h2>General</h2><label>Organization Name<input name="organization_name" defaultValue={settings.organization_name} required maxLength={160} /></label></div>
       <div><h2>Playback Defaults</h2><label>Default Slide Duration<input name="default_slide_duration_seconds" type="number" min="1" max="3600" defaultValue={settings.default_slide_duration_seconds} /> seconds</label></div>
+      <div className="settings-feature"><div><h2>Announcement Playlists</h2><p>Build temporary, scheduled rotations that return displays to their regular content afterward.</p></div><label className="feature-switch"><input name="playlists_enabled" type="checkbox" defaultChecked={settings.playlists_enabled} /><span aria-hidden="true" /><b>Enable playlists</b></label><small>Off by default. When disabled, scheduled playlist playback pauses and the Playlists section is hidden.</small></div>
       <div><h2>Regional</h2><label>Timezone<input name="timezone" defaultValue={settings.timezone} placeholder="America/New_York" required /><small>Use an IANA timezone ID.</small></label></div>
       {error && <p className="form-error">{error}</p>}
       <div className="button-row"><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save Changes"}</button>{!busy && <small>Changes apply immediately.</small>}</div>
