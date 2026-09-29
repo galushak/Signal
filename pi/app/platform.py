@@ -82,14 +82,14 @@ class RaspberryPiPlatform(PlayerPlatform):
 
     def _xrandr(self, *args: str) -> subprocess.CompletedProcess[str]:
         environment = {**os.environ, "DISPLAY": ":0", "XAUTHORITY": "/var/lib/signal-player/.Xauthority"}
-        return subprocess.run(["xrandr", *args], env=environment, text=True, capture_output=True, check=False)
+        return subprocess.run(["xrandr", *args], env=environment, text=True, capture_output=True, check=False, timeout=3)
 
     def resolution(self) -> str:
         try:
             result = self._xrandr("--current")
             match = re.search(r"\s(\d{3,5})x(\d{3,5})\+\d+\+\d+", result.stdout)
             return f"{match.group(1)}x{match.group(2)}" if match else super().resolution()
-        except OSError:
+        except (OSError, subprocess.TimeoutExpired):
             return super().resolution()
 
     def set_resolution(self, resolution: str) -> tuple[str, dict]:
@@ -97,7 +97,7 @@ class RaspberryPiPlatform(PlayerPlatform):
             return "failed", {"error": "Invalid resolution."}
         try:
             result = self._xrandr("--size", resolution)
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             return "failed", {"error": str(exc)}
         if result.returncode:
             return "failed", {"error": (result.stderr or result.stdout or "xrandr rejected this resolution.").strip()}
