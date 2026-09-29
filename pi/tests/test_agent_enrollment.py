@@ -1,3 +1,5 @@
+import subprocess
+
 from app.agent import PlayerAgent
 from app.cli import main as cli_main
 from app.main import PLAYER_HTML
@@ -100,6 +102,26 @@ def test_force_sync_acknowledges_the_web_content_reload(tmp_path):
     assert client.results[0][1]["status"] == "completed"
     assert client.results[0][1]["result"]["state"] == "already_up_to_date"
     assert client.results[0][1]["result"]["web_content"] == "reloaded"
+
+
+def test_stalled_pi_resolution_probe_does_not_stop_heartbeat(tmp_path, monkeypatch):
+    def run(command, **kwargs):
+        if command[0] == "pgrep":
+            return subprocess.CompletedProcess(command, 0)
+        assert command == ["xrandr", "--current"]
+        assert kwargs["timeout"] == 3
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr("app.platform.subprocess.run", run)
+    agent = PlayerAgent(state_dir=tmp_path / "state", api_url="http://signal", platform=RaspberryPiPlatform(), config_path=tmp_path / "config.toml")
+    agent.identity.update({"player_id": "player-1", "device_secret": "secret"})
+    client = CommandClient()
+    agent.client = client
+
+    agent.heartbeat()
+
+    assert client.results[0][0].endswith("/player-agent/heartbeat")
+    assert client.results[0][1]["resolution"] == "1920x1080"
 
 
 def test_player_version_is_explicit_and_used_by_cli(capsys):
